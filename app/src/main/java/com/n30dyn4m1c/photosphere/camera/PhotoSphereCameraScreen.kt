@@ -20,12 +20,15 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -43,6 +46,8 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -51,9 +56,19 @@ import com.n30dyn4m1c.photosphere.sensor.OrientationAccuracy
 import com.n30dyn4m1c.photosphere.sensor.OrientationData
 import com.n30dyn4m1c.photosphere.sensor.currentDisplayRotation
 import com.n30dyn4m1c.photosphere.sensor.rememberOrientationTracker
+import com.n30dyn4m1c.photosphere.stitching.PhotoSphereStitcher
+import com.n30dyn4m1c.photosphere.stitching.StitchException
+import com.n30dyn4m1c.photosphere.stitching.StitchProgress
+import com.n30dyn4m1c.photosphere.stitching.StitchStage
+import com.n30dyn4m1c.photosphere.stitching.StitchStatus
+import com.n30dyn4m1c.photosphere.storage.ImageBufferManager
 import com.n30dyn4m1c.photosphere.storage.SphereImageStore
+import com.n30dyn4m1c.photosphere.storage.rememberImageBufferManager
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -100,12 +115,21 @@ fun PhotoSphereCameraScreen(modifier: Modifier = Modifier) {
         }
     }
 
+    val buffer = rememberImageBufferManager()
+    val bufferedFrames by buffer.frames.collectAsStateWithLifecycle()
+    val sessionId by buffer.sessionId.collectAsStateWithLifecycle()
+
     var imageCapture by remember { mutableStateOf<ImageCapture?>(null) }
     var plan by remember { mutableStateOf<SphereTargetPlan?>(null) }
     var activeIndex by remember { mutableIntStateOf(0) }
-    var sessionId by remember { mutableStateOf(SphereImageStore.newSessionId()) }
     var isHolding by remember { mutableStateOf(false) }
     var accuracy by remember { mutableStateOf(OrientationAccuracy.Unknown) }
+
+    // The stitch runs off the main thread and reports back from there, so its
+    // progress travels as a StateFlow rather than as Compose state written from
+    // a background dispatcher.
+    val stitchProgress = remember { MutableStateFlow(StitchProgress.Preparing) }
+    var stitchJob by remember { mutableStateOf<Job?>(null) }
 
     /**
      * Changes at the sensor's rate and is therefore never read during
@@ -162,7 +186,7 @@ fun PhotoSphereCameraScreen(modifier: Modifier = Modifier) {
     // Old sessions are dead weight once a new one starts; clearing them keeps the
     // cache from growing by a sphere's worth of full-resolution JPEGs per run.
     LaunchedEffect(sessionId) {
-        withContext(Dispatchers.IO) { SphereImageStore.pruneSessions(context, sessionId) }
+        buffer.pruneStaleSessions()
     }
 
     // The capture loop. Collecting suspends across the shutter, which is what
@@ -175,6 +199,13 @@ fun PhotoSphereCameraScreen(modifier: Modifier = Modifier) {
         tracker.orientation.collect { orientation ->
             if (!orientation.hasFix) return@collect
             accuracy = orientation.accuracy
+
+            // A frame landing halfway through a stitch would not be in the set
+            // being stitched, and would be deleted when that set is cleared.
+            if (stitchJob != null) {
+                gate.reset()
+                return@collect
+            }
 
             val currentPlan = plan
                 ?: SphereTargetPlan.create(startYawDegrees = orientation.yawDegrees)
@@ -204,7 +235,7 @@ fun PhotoSphereCameraScreen(modifier: Modifier = Modifier) {
             alignment = alignment.copy(isCapturing = true)
             val result = capture.saveFrame(
                 context = context,
-                sessionId = sessionId,
+                buffer = buffer,
                 index = index,
                 orientation = orientation,
             )
@@ -232,6 +263,66 @@ fun PhotoSphereCameraScreen(modifier: Modifier = Modifier) {
 
     val totalTargets = plan?.size ?: 0
     val isComplete = totalTargets > 0 && activeIndex >= totalTargets
+
+    /** Clears the guidance state so the next sphere starts from scratch. */
+    fun resetGuidance() {
+        plan = null
+        activeIndex = 0
+        isHolding = false
+        alignment = AlignmentState()
+    }
+
+    /**
+     * Hands the buffered frames to the stitcher and saves what comes back.
+     *
+     * Started lazily so [stitchJob] is set before the body can reach its own
+     * `finally` and clear it.
+     */
+    fun startStitch() {
+        if (stitchJob != null) return
+        val frames = buffer.files()
+        stitchProgress.value = StitchProgress.Preparing
+
+        val job = scope.launch(start = CoroutineStart.LAZY) {
+            try {
+                PhotoSphereStitcher.stitchPhotos(frames) { stitchProgress.value = it }
+                    .onSuccess { sphere ->
+                        val saved = try {
+                            withContext(Dispatchers.IO) {
+                                SphereImageStore.saveSphere(context, sphere)
+                            }
+                        } finally {
+                            sphere.recycle()
+                        }
+                        // The frames have done their job; the sphere is what the
+                        // user asked for and it is now in the gallery.
+                        buffer.clear()
+                        resetGuidance()
+                        snackbarHostState.showSnackbar(
+                            context.getString(R.string.stitch_saved, saved.displayName)
+                        )
+                    }
+                    .onFailure { error ->
+                        Log.e(TAG, "Stitch failed", error)
+                        // Frames are deliberately kept: the usual fix is to
+                        // capture a few more and try again.
+                        snackbarHostState.showSnackbar(context.stitchFailureMessage(error))
+                    }
+            } finally {
+                stitchJob = null
+            }
+        }
+        stitchJob = job
+        job.start()
+    }
+
+    val stitchState by stitchProgress.collectAsStateWithLifecycle()
+    if (stitchJob != null) {
+        StitchingDialog(
+            progress = stitchState,
+            onCancel = { stitchJob?.cancel() },
+        )
+    }
 
     Scaffold(
         modifier = modifier.fillMaxSize(),
@@ -264,12 +355,14 @@ fun PhotoSphereCameraScreen(modifier: Modifier = Modifier) {
                     accuracy = accuracy,
                 ),
                 isComplete = isComplete,
+                // Below this the stitcher has nothing to work with: a handful of
+                // frames from one corner of the sphere cannot be registered.
+                canStitch = bufferedFrames.size >= PhotoSphereStitcher.MIN_FRAMES &&
+                    stitchJob == null,
+                onFinish = { startStitch() },
                 onRestart = {
-                    plan = null
-                    activeIndex = 0
-                    isHolding = false
-                    alignment = AlignmentState()
-                    sessionId = SphereImageStore.newSessionId()
+                    resetGuidance()
+                    scope.launch { buffer.cancelSession() }
                 },
                 modifier = Modifier
                     .fillMaxSize()
@@ -286,6 +379,8 @@ private fun CaptureHud(
     totalTargets: Int,
     hint: String,
     isComplete: Boolean,
+    canStitch: Boolean,
+    onFinish: () -> Unit,
     onRestart: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -333,6 +428,14 @@ private fun CaptureHud(
                     .background(Color.Black.copy(alpha = 0.45f))
                     .padding(horizontal = 16.dp, vertical = 10.dp),
             )
+            // Offered as soon as there is enough to stitch, not only at the end:
+            // a user who has covered what they care about should not have to
+            // walk the remaining targets to get a sphere out of it.
+            if (canStitch) {
+                Button(onClick = onFinish) {
+                    Text(stringResource(R.string.capture_finish_stitch))
+                }
+            }
             if (isComplete) {
                 Button(onClick = onRestart) {
                     Text(stringResource(R.string.capture_restart))
@@ -340,6 +443,96 @@ private fun CaptureHud(
             }
         }
     }
+}
+
+/**
+ * Blocks the screen while OpenCV works.
+ *
+ * Deliberately modal and not dismissable by tapping outside: the stitch owns the
+ * frames for its duration, so the capture loop is paused behind it and there is
+ * nothing useful to go back to. Cancelling is offered explicitly, and takes
+ * effect at the next stage boundary — the native call cannot be interrupted
+ * partway.
+ */
+@Composable
+private fun StitchingDialog(
+    progress: StitchProgress,
+    onCancel: () -> Unit,
+) {
+    Dialog(
+        onDismissRequest = { },
+        properties = DialogProperties(
+            dismissOnBackPress = false,
+            dismissOnClickOutside = false,
+        ),
+    ) {
+        Surface(
+            shape = RoundedCornerShape(24.dp),
+            tonalElevation = 6.dp,
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
+                Text(
+                    text = stringResource(R.string.stitch_title),
+                    style = MaterialTheme.typography.titleMedium,
+                )
+
+                val fraction = progress.fraction
+                if (fraction != null) {
+                    CircularProgressIndicator(progress = { fraction })
+                } else {
+                    // Everything inside OpenCV's stitch call is opaque, so the
+                    // spinner spins rather than reporting a made-up percentage.
+                    CircularProgressIndicator()
+                }
+
+                Text(
+                    text = progress.label(),
+                    style = MaterialTheme.typography.bodyMedium,
+                    textAlign = TextAlign.Center,
+                )
+
+                TextButton(onClick = onCancel) {
+                    Text(stringResource(R.string.stitch_cancel))
+                }
+            }
+        }
+    }
+}
+
+/** The one line describing what the stitcher is currently doing. */
+@Composable
+private fun StitchProgress.label(): String = when (stage) {
+    StitchStage.Preparing -> stringResource(R.string.stitch_stage_preparing)
+    StitchStage.Reading -> stringResource(R.string.stitch_stage_reading, completed, total)
+    StitchStage.Stitching -> stringResource(R.string.stitch_stage_stitching)
+    StitchStage.Projecting -> stringResource(R.string.stitch_stage_projecting)
+}
+
+/** Turns a failed stitch into something worth showing a user. */
+private fun Context.stitchFailureMessage(error: Throwable): String {
+    val status = (error as? StitchException)?.status ?: StitchStatus.Unknown
+    val reason = when (status) {
+        StitchStatus.NeedMoreImages,
+        StitchStatus.NoInputImages,
+        -> getString(R.string.stitch_error_need_more_images)
+
+        StitchStatus.AlignmentFailed -> getString(R.string.stitch_error_alignment)
+        StitchStatus.CameraEstimationFailed -> getString(R.string.stitch_error_camera_estimation)
+        StitchStatus.OpenCvUnavailable -> getString(R.string.stitch_error_opencv_unavailable)
+        StitchStatus.UnreadableInput -> getString(R.string.stitch_error_unreadable_input)
+        StitchStatus.OutOfMemory -> getString(R.string.stitch_error_out_of_memory)
+        StitchStatus.EmptyResult,
+        StitchStatus.Unknown,
+        StitchStatus.Ok,
+        -> getString(R.string.stitch_error_unknown, status.code)
+    }
+    return getString(R.string.stitch_failed, reason)
 }
 
 /** Picks the single most useful thing to tell the user right now. */
@@ -362,34 +555,24 @@ private fun captureHint(
 }
 
 /**
- * Writes one frame to the session's cache directory.
+ * Writes one frame to the session's cache directory and buffers it.
  *
- * The device's attitude at the moment of capture is stamped into EXIF: the
- * stitcher gets a free initial guess at where each frame belongs, which is worth
- * far more than the couple of milliseconds it costs here.
+ * The device's attitude at the moment of capture goes into the buffer entry and
+ * into the file's EXIF: the stitcher gets a free initial guess at where each
+ * frame belongs, which is worth far more than the couple of milliseconds it
+ * costs here.
  */
 private suspend fun ImageCapture.saveFrame(
     context: Context,
-    sessionId: String,
+    buffer: ImageBufferManager,
     index: Int,
     orientation: OrientationData,
 ): Result<File> = try {
-    val directory = withContext(Dispatchers.IO) {
-        SphereImageStore.sessionDirectory(context, sessionId)
-    }
-    val request = SphereImageStore.newTempFrameOptions(directory, index)
+    val request = buffer.reserveFrame(index)
 
     takePictureTo(context, request.outputOptions)
 
-    withContext(Dispatchers.IO) {
-        SphereImageStore.stampCaptureOrientation(
-            file = request.file,
-            index = index,
-            yawDegrees = orientation.yawDegrees,
-            pitchDegrees = orientation.pitchDegrees,
-            rollDegrees = orientation.rollDegrees,
-        )
-    }
+    buffer.record(file = request.file, index = index, orientation = orientation)
     Result.success(request.file)
 } catch (e: CancellationException) {
     // Leaving the screen mid-shutter is not a capture failure; let the

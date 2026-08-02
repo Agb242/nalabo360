@@ -2,10 +2,11 @@
 
 Android app scaffold for capturing and stitching 360° photo spheres.
 
-The app currently covers **guided capture**: a CameraX viewfinder with a target
-alignment overlay that walks the user around the sphere and fires the shutter
-by itself whenever the camera settles on the next frame. The stitching pipeline
-is not implemented yet.
+The app covers **guided capture** — a CameraX viewfinder with a target alignment
+overlay that walks the user around the sphere and fires the shutter by itself
+whenever the camera settles on the next frame — and **stitching**: OpenCV joins
+the captured frames into a 2:1 equirectangular image and saves it to the
+gallery.
 
 ## Requirements
 
@@ -142,7 +143,12 @@ app/src/main/java/com/n30dyn4m1c/photosphere/
 │   ├── OrientationTracker.kt    # rotation vector -> yaw/pitch/roll StateFlow
 │   ├── OrientationState.kt      # lifecycle-aware Compose bindings
 │   └── OrientationDebugScreen.kt# live readout for on-device verification
-├── storage/SphereImageStore.kt  # cache sessions, MediaStore writes, EXIF
+├── stitching/
+│   ├── PhotoSphereStitcher.kt   # OpenCV Stitcher pass, statuses, progress
+│   └── EquirectangularFit.kt    # placing a panorama in a 2:1 canvas
+├── storage/
+│   ├── SphereImageStore.kt      # cache sessions, MediaStore writes, EXIF
+│   └── ImageBufferManager.kt    # this run's frames + their capture attitude
 └── ui/theme/                    # Material 3 theme
 ```
 
@@ -235,10 +241,57 @@ The geometry, the target plan and the trigger rule are pure Kotlin, and are
 covered by local unit tests in
 [`app/src/test/java/com/n30dyn4m1c/photosphere/camera/`](app/src/test/java/com/n30dyn4m1c/photosphere/camera).
 
+## Stitching
+
+**The buffer.** [`ImageBufferManager`](app/src/main/java/com/n30dyn4m1c/photosphere/storage/ImageBufferManager.kt)
+is what capture and stitching pass frames through. Each entry is a file in the
+session's cache directory plus the yaw/pitch/roll the device held when it was
+shot; the pixels stay on disk, because a sphere held as decoded bitmaps is
+several hundred megabytes of heap. It owns the session id, so `clear()` (frames
+consumed by a successful stitch) and `cancelSession()` (start over — the whole
+session directory goes) are the only two ways frames leave.
+
+**The stitch.** [`PhotoSphereStitcher`](app/src/main/java/com/n30dyn4m1c/photosphere/stitching/PhotoSphereStitcher.kt)
+runs OpenCV's `Stitcher` in `PANORAMA` mode on `Dispatchers.Default`. That mode
+warps onto a sphere rather than a plane, which is what makes the result
+equirectangular geometry in the first place. Frames are decoded subsampled to
+1024 px on the long edge and rotated upright from their EXIF before they become
+`Mat`s — OpenCV holds every frame plus its warped copy at once, so full
+resolution is a reliable way to run a phone out of memory.
+
+Failures come back as a failed `Result` carrying a `StitchException` with a
+`StitchStatus`. The first four statuses are OpenCV's own return codes, so a
+`ERR_NEED_MORE_IMAGES` ("not enough overlap") and a `ERR_HOMOGRAPHY_EST_FAIL`
+("the camera moved between frames instead of turning on the spot") reach the
+user as different sentences; the rest cover this pipeline's own failures —
+native library missing, unreadable frame, out of memory.
+
+**The 2:1 canvas.** OpenCV returns the bounding box of whatever was warped onto
+the sphere, black where the capture did not reach.
+[`EquirectangularFit`](app/src/main/java/com/n30dyn4m1c/photosphere/stitching/EquirectangularFit.kt)
+crops that to its content and centres it in the smallest 2:1 canvas that holds
+it. It deliberately does not stretch: the ±60° capture plan covers 360°×120°, and
+scaling that to fill a 2:1 frame would put every pixel at the wrong latitude.
+Uncovered poles stay black. The geometry is pure integer arithmetic and is unit
+tested.
+
+**In the UI.** A **Finish & stitch** button appears in
+`PhotoSphereCameraScreen` once six frames are buffered — enough for a stitch to
+have something to register — and a modal with a progress indicator covers the
+screen while the work runs. Frame decoding reports real progress; everything
+inside OpenCV's `stitch` call is one opaque block, so that stage shows an
+indeterminate spinner rather than a bar that lies. Cancelling takes effect at the
+next stage boundary, since the native call cannot be interrupted partway. On
+success the sphere is written to `Pictures/PhotoSphere/` through MediaStore and
+the buffered frames are deleted; on failure they are kept, because the usual fix
+is to capture a few more and try again.
+
 ## Not implemented yet
 
-- OpenCV `Stitcher` pass over the captured frames
 - XMP **GPano** metadata on the stitched equirectangular output. This is what
   makes Google Photos and other viewers render an image as a sphere —
   `ExifInterface` writes EXIF only and cannot write XMP, so this needs a
-  separate writer.
+  separate writer. Until then the output is an ordinary 2:1 JPEG.
+- Using the captured yaw/pitch/roll to seed the stitcher's camera estimates.
+  `ImageBufferManager` records it and EXIF carries it, but OpenCV's Java
+  bindings do not expose the camera parameters that would let it be fed in.
