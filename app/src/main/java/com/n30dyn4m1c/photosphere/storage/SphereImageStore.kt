@@ -8,8 +8,11 @@ import android.os.Build
 import android.provider.MediaStore
 import android.util.Log
 import androidx.camera.core.ImageCapture
+import androidx.core.content.FileProvider
 import androidx.exifinterface.media.ExifInterface
+import com.n30dyn4m1c.photosphere.metadata.GPanoXmpInjector
 import java.io.File
+import java.io.FileOutputStream
 import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -18,16 +21,18 @@ import java.util.Locale
 /**
  * Where captured frames go.
  *
- * Two destinations, for two different kinds of image:
+ * Three destinations, for three different kinds of image:
  *
  * - **Cache sessions** ([sessionDirectory], [newTempFrameOptions]) hold the raw
  *   frames of a capture run. They are intermediate data, they are large, and
  *   they are cleared when the next run starts.
- * - **MediaStore** ([newFrameOutputOptions]) is for images the user keeps. It
- *   works on every supported API level, so no storage permission is needed from
- *   API 29 up; on API 26–28 the insert still resolves to a legacy file path, so
- *   `WRITE_EXTERNAL_STORAGE` must be granted first (see
- *   `MainActivity.REQUIRED_PERMISSIONS`).
+ * - **The sphere cache** ([writeStitchedSphere]) holds the one finished
+ *   equirectangular JPEG a run produces, complete with its GPano metadata. It
+ *   lives there while the user looks at it on the result screen, and goes no
+ *   further unless they ask.
+ * - **MediaStore** is for images the user keeps, and is
+ *   [MediaExporter]'s job — "Export to gallery" on the result screen is the only
+ *   thing that puts a sphere in front of the rest of the system.
  */
 object SphereImageStore {
 
@@ -37,6 +42,15 @@ object SphereImageStore {
 
     /** Cache subdirectory holding one directory per capture session. */
     private const val SESSIONS_DIRECTORY = "sphere_sessions"
+
+    /**
+     * Cache subdirectory holding finished spheres awaiting a decision.
+     *
+     * Shared out through a `FileProvider`, so it is named in
+     * `res/xml/file_paths.xml` too — the two must stay in step or sharing fails
+     * with an `IllegalArgumentException` at the moment the user taps Share.
+     */
+    private const val SPHERES_DIRECTORY = "spheres"
 
     /**
      * Encode quality for the finished sphere. High, because this is the only
@@ -57,10 +71,19 @@ object SphereImageStore {
         val file: File,
     )
 
-    /** A finished sphere, as it now exists in the gallery. */
-    data class SavedSphere(
-        val uri: Uri,
-        val displayName: String,
+    /**
+     * A stitched sphere on its way to the user: a GPano-tagged JPEG in the cache,
+     * and the dimensions written into that metadata.
+     *
+     * Held as a file rather than a `Bitmap` because it is what both destinations
+     * want — [MediaExporter] copies its bytes into the gallery and the share
+     * sheet hands out a URI to it — and because a 4096×2048 bitmap is 32 MB of
+     * heap to carry across a screen change for no reason.
+     */
+    data class StitchedSphere(
+        val file: File,
+        val width: Int,
+        val height: Int,
     )
 
     /** Identifier for one run of guided capture. Sorts chronologically. */
@@ -187,88 +210,97 @@ object SphereImageStore {
     }
 
     /**
-     * Writes a finished equirectangular sphere to the gallery.
+     * Encodes a finished equirectangular sphere into the cache as a 360 photo.
      *
-     * This is the one image of a run the user actually asked for, so it goes to
-     * MediaStore rather than the cache. On API 29+ the row is inserted pending
-     * and only published once the pixels are down, which keeps a half-written
-     * JPEG out of the gallery if the process dies mid-save.
+     * This is the handover between stitching and the result screen: the pixels
+     * come off the heap into a JPEG, the JPEG is tagged, and everything
+     * downstream — preview, gallery export, share sheet — works from that one
+     * file.
      *
-     * The "this is a 360 photo" marker viewers look for is XMP GPano, which
-     * [ExifInterface] cannot write — see [stampSphereMetadata]. Until that lands
-     * the file is a perfectly good 2:1 image that viewers will show flat.
+     * The order of the two metadata passes matters. EXIF goes on first, because
+     * [ExifInterface.saveAttributes] rewrites the whole JPEG and makes no promise
+     * about carrying unrecognised segments across; GPano goes on second, so the
+     * marker that makes viewers treat this as a sphere is written by the last
+     * thing to touch the file. Neither pass re-encodes the image.
+     *
+     * A sphere left over from an earlier run is deleted first: only one is ever
+     * in play, and each is several megabytes.
      *
      * Blocking I/O and a full-size compress — call off the main thread. Throws
-     * [IOException] if MediaStore refuses the insert or the encode fails.
+     * [IOException] if the encode fails.
      */
-    fun saveSphere(
+    fun writeStitchedSphere(
         context: Context,
         bitmap: Bitmap,
         quality: Int = SPHERE_JPEG_QUALITY,
-    ): SavedSphere {
-        val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        val displayName = "sphere_%s.jpg".format(timestamp)
-        val isScopedStorage = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
-
-        val values = ContentValues().apply {
-            put(MediaStore.Images.Media.DISPLAY_NAME, displayName)
-            put(MediaStore.Images.Media.MIME_TYPE, MIME_TYPE)
-            put(MediaStore.Images.Media.WIDTH, bitmap.width)
-            put(MediaStore.Images.Media.HEIGHT, bitmap.height)
-            if (isScopedStorage) {
-                put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/$ALBUM")
-                put(MediaStore.Images.Media.IS_PENDING, 1)
-            }
+    ): StitchedSphere {
+        val directory = spheresDirectory(context)
+        directory.listFiles()?.forEach { stale ->
+            if (!stale.delete()) Log.w(TAG, "Could not clear stale sphere ${stale.name}")
         }
 
-        val resolver = context.contentResolver
-        val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
-            ?: throw IOException("MediaStore would not accept $displayName")
+        val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        val file = File(directory, "sphere_%s.jpg".format(timestamp))
 
         try {
-            val stream = resolver.openOutputStream(uri)
-                ?: throw IOException("Could not open $uri for writing")
-            stream.use { out ->
+            FileOutputStream(file).use { out ->
                 if (!bitmap.compress(Bitmap.CompressFormat.JPEG, quality, out)) {
                     throw IOException("Could not encode the stitched sphere")
                 }
             }
         } catch (e: Exception) {
-            // A pending row nobody publishes is invisible but not free; drop it
-            // rather than leaving a zero-byte entry behind.
-            runCatching { resolver.delete(uri, null, null) }
+            file.delete()
             throw e
         }
 
-        if (isScopedStorage) {
-            resolver.update(
-                uri,
-                ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) },
-                null,
-                null,
-            )
-        }
-        stampSphereDescription(context, uri)
+        stampSphereDescription(file)
+        GPanoXmpInjector.inject(file, bitmap.width, bitmap.height)
+            .onFailure { error ->
+                // Recoverable: the file is a valid 2:1 JPEG either way, it will
+                // simply open flat instead of as a sphere.
+                Log.w(TAG, "Could not write GPano metadata for ${file.name}", error)
+            }
 
-        return SavedSphere(uri = uri, displayName = displayName)
+        return StitchedSphere(file = file, width = bitmap.width, height = bitmap.height)
     }
 
-    /** Marks a saved sphere as this app's output, in EXIF. */
-    private fun stampSphereDescription(context: Context, uri: Uri) {
+    /** Directory holding the finished sphere of the current run, created if needed. */
+    private fun spheresDirectory(context: Context): File =
+        File(context.cacheDir, SPHERES_DIRECTORY).apply { mkdirs() }
+
+    /**
+     * A URI another app can read [file] through.
+     *
+     * The share sheet cannot be handed a `file://` URI — since API 24 that
+     * throws `FileUriExposedException` — so the cached sphere goes out through
+     * the app's `FileProvider`. The authority is derived from the running
+     * package rather than hardcoded, because the debug build carries a
+     * `.debug` suffix.
+     */
+    fun shareUri(context: Context, file: File): Uri =
+        FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+
+    /** Discards a cached sphere the user has finished with. */
+    fun deleteCachedSphere(file: File) {
+        if (file.exists() && !file.delete()) {
+            Log.w(TAG, "Could not delete cached sphere ${file.name}")
+        }
+    }
+
+    /** Marks a finished sphere as this app's output, in EXIF. */
+    private fun stampSphereDescription(file: File) {
         try {
-            context.contentResolver.openFileDescriptor(uri, "rw")?.use { descriptor ->
-                ExifInterface(descriptor.fileDescriptor).apply {
-                    setAttribute(ExifInterface.TAG_SOFTWARE, "PhotoSphere")
-                    setAttribute(
-                        ExifInterface.TAG_IMAGE_DESCRIPTION,
-                        "$ALBUM equirectangular panorama",
-                    )
-                    saveAttributes()
-                }
+            ExifInterface(file).apply {
+                setAttribute(ExifInterface.TAG_SOFTWARE, "PhotoSphere")
+                setAttribute(
+                    ExifInterface.TAG_IMAGE_DESCRIPTION,
+                    "$ALBUM equirectangular panorama",
+                )
+                saveAttributes()
             }
         } catch (e: Exception) {
             // Metadata is a nice-to-have; never lose the sphere over it.
-            Log.w(TAG, "Could not write EXIF for $uri", e)
+            Log.w(TAG, "Could not write EXIF for ${file.name}", e)
         }
     }
 
@@ -280,8 +312,8 @@ object SphereImageStore {
      *
      * Note: the "this is a 360 photo" marker that Google Photos and other viewers
      * look for is XMP GPano, not EXIF, and [ExifInterface] cannot write XMP.
-     * The equirectangular output will need GPano injected separately once the
-     * stitch step lands.
+     * That marker belongs on the stitched sphere rather than on a frame, and
+     * [GPanoXmpInjector] is what writes it.
      */
     fun stampSphereMetadata(context: Context, uri: Uri, index: Int) {
         try {

@@ -4,9 +4,10 @@ Android app scaffold for capturing and stitching 360° photo spheres.
 
 The app covers **guided capture** — a CameraX viewfinder with a target alignment
 overlay that walks the user around the sphere and fires the shutter by itself
-whenever the camera settles on the next frame — and **stitching**: OpenCV joins
-the captured frames into a 2:1 equirectangular image and saves it to the
-gallery.
+whenever the camera settles on the next frame — **stitching**: OpenCV joins the
+captured frames into a 2:1 equirectangular image — and **publishing**: GPano XMP
+metadata is injected so viewers open the result as a pannable 360 photo, and a
+result screen offers it to the gallery and the share sheet.
 
 ## Requirements
 
@@ -108,9 +109,11 @@ sufficient.
 
 Frames captured during a run are written to the app's own cache
 (`cacheDir/sphere_sessions/<session>/`), which needs no permission at all —
-they are stitcher input, not photos the user asked to keep. MediaStore
-(`Pictures/PhotoSphere/`) is reserved for finished output; it works on every API
-level, so from API 29 up no storage permission is requested either.
+they are stitcher input, not photos the user asked to keep. The finished sphere
+lands beside them in `cacheDir/spheres/` and stays private until the user asks
+for it. MediaStore (`Pictures/360Panoramas/`) is reserved for that moment; it
+works on every API level, so from API 29 up no storage permission is requested
+either.
 
 ### Runtime handling
 
@@ -146,8 +149,13 @@ app/src/main/java/com/n30dyn4m1c/photosphere/
 ├── stitching/
 │   ├── PhotoSphereStitcher.kt   # OpenCV Stitcher pass, statuses, progress
 │   └── EquirectangularFit.kt    # placing a panorama in a 2:1 canvas
+├── metadata/
+│   └── GPanoXmpInjector.kt      # GPano XMP into the JPEG header, no re-encode
+├── result/
+│   └── PanoramaResultScreen.kt  # preview, export to gallery, share, start over
 ├── storage/
-│   ├── SphereImageStore.kt      # cache sessions, MediaStore writes, EXIF
+│   ├── SphereImageStore.kt      # cache sessions, the finished sphere, EXIF
+│   ├── MediaExporter.kt         # MediaStore write into Pictures/360Panoramas
 │   └── ImageBufferManager.kt    # this run's frames + their capture attitude
 └── ui/theme/                    # Material 3 theme
 ```
@@ -282,16 +290,54 @@ screen while the work runs. Frame decoding reports real progress; everything
 inside OpenCV's `stitch` call is one opaque block, so that stage shows an
 indeterminate spinner rather than a bar that lies. Cancelling takes effect at the
 next stage boundary, since the native call cannot be interrupted partway. On
-success the sphere is written to `Pictures/PhotoSphere/` through MediaStore and
-the buffered frames are deleted; on failure they are kept, because the usual fix
-is to capture a few more and try again.
+success the sphere is written to the cache as a GPano-tagged JPEG, the buffered
+frames are deleted, and the result screen takes over; on failure the frames are
+kept, because the usual fix is to capture a few more and try again.
+
+## The finished sphere
+
+**GPano metadata.** [`GPanoXmpInjector`](app/src/main/java/com/n30dyn4m1c/photosphere/metadata/GPanoXmpInjector.kt)
+is what makes the output a *360 photo* rather than a wide picture: Google
+Photos, Facebook and friends switch to a sphere viewer on an XMP packet in the
+`GPano` namespace, and `ExifInterface` writes EXIF only. It walks the JPEG's
+marker segments, drops any XMP already present, splices an `APP1` segment in
+after JFIF/Exif, and copies every remaining byte — tables, frame header and the
+entropy-coded scan — through verbatim. **Nothing is decoded or re-encoded**, so
+tagging costs no image quality on a file that has already been through one
+generation of JPEG on the way in. Eight properties are written:
+`UsePanoramaViewer`, `ProjectionType`, `FullPano{Width,Height}Pixels` and the
+four `CroppedArea*` values, which cover the whole image because
+`EquirectangularFit` has already letterboxed the covered band into a full 2:1
+canvas. It is plain `java.io`, so it is covered by local unit tests that assert
+the image data comes out byte-identical.
+
+**The result screen.** [`PanoramaResultScreen`](app/src/main/java/com/n30dyn4m1c/photosphere/result/PanoramaResultScreen.kt)
+shows the sphere flat — the black wedges at the poles are the parts the run
+never reached, and they are worth seeing before deciding to keep it — over three
+actions: **Export to gallery**, **Share**, and **New photo**. Nothing has been
+published at this point, which is deliberate: a run that came out badly should
+not have to be deleted out of the camera roll afterwards. "New photo" discards
+the cached JPEG and returns to capture with an empty buffer; the system back
+gesture does the same thing.
+
+**Export.** [`MediaExporter`](app/src/main/java/com/n30dyn4m1c/photosphere/storage/MediaExporter.kt)
+copies the file into `Pictures/360Panoramas` through MediaStore. From API 29 the
+row is inserted with `IS_PENDING = 1`, the bytes are streamed into the URI
+MediaStore hands back, and `IS_PENDING` is cleared only once the copy finishes,
+so a half-written JPEG is never visible in the gallery. On API 26–28 there is no
+`RELATIVE_PATH` and no pending flag, so the file is written into the public
+Pictures directory and the row points at it with `DATA` — that path is why
+`WRITE_EXTERNAL_STORAGE` is requested on exactly those versions. Either way it
+is a byte copy, not a re-encode, which is what keeps the GPano packet intact.
+
+**Share** sends the same JPEG through `Intent.ACTION_SEND`. The cache is
+private, and a `file://` URI would throw `FileUriExposedException` on anything
+since API 24, so it travels as a `content://` URI from the app's `FileProvider`
+(`res/xml/file_paths.xml` exposes `cacheDir/spheres/` and nothing else) with a
+read grant attached.
 
 ## Not implemented yet
 
-- XMP **GPano** metadata on the stitched equirectangular output. This is what
-  makes Google Photos and other viewers render an image as a sphere —
-  `ExifInterface` writes EXIF only and cannot write XMP, so this needs a
-  separate writer. Until then the output is an ordinary 2:1 JPEG.
 - Using the captured yaw/pitch/roll to seed the stitcher's camera estimates.
   `ImageBufferManager` records it and EXIF carries it, but OpenCV's Java
   bindings do not expose the camera parameters that would let it be fed in.

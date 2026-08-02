@@ -67,6 +67,25 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!--
+            Lets the share sheet read a finished sphere out of the app's private
+            cache. A file:// URI would throw FileUriExposedException on API 24+,
+            so the result screen shares a content:// URI from here instead,
+            granted per-recipient and revoked when the task ends.
+
+            The authority follows the applicationId, so the debug build's
+            ".debug" suffix keeps it from clashing with a release install.
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 
 </manifest>
