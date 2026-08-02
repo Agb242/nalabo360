@@ -26,6 +26,10 @@ lowering it is possible — you would need to add pre-API-26 launcher icon PNGs.
 
 ## Build
 
+You need the Android SDK (compileSdk 35 + build-tools 35) and a JDK 17. The
+simplest route is Android Studio, which supplies both: open the project folder,
+let it sync, and it writes `local.properties` for you. From the command line:
+
 ```bash
 # Point the build at your SDK (or let Android Studio create this file).
 echo "sdk.dir=$ANDROID_HOME" > local.properties
@@ -33,13 +37,52 @@ echo "sdk.dir=$ANDROID_HOME" > local.properties
 ./gradlew :app:assembleDebug
 ```
 
+`local.properties` is machine-specific and git-ignored — it is the one file you
+must create yourself before a fresh clone will build.
+
 The ABI split in `app/build.gradle.kts` produces one APK per ABI
 (`arm64-v8a`, `armeabi-v7a`, `x86_64`) instead of a single universal one,
-because the OpenCV AAR carries native libraries for every ABI. Install with:
+because the OpenCV AAR carries native libraries for every ABI. They land in
+`app/build/outputs/apk/debug/`. Because the split makes several APKs out of one
+variant, there is no per-ABI install task — install to a connected device with
 
 ```bash
-./gradlew :app:installArm64-v8aDebug
+./gradlew :app:installDebug          # picks the APK matching the device
+adb install -r app/build/outputs/apk/debug/app-arm64-v8a-debug.apk   # or by hand
 ```
+
+Debug builds are signed with the local debug keystore and carry the
+`.debug` application id suffix, so they sideload and can sit alongside a release
+install. `assembleRelease` produces an **unsigned** APK — add a `signingConfigs`
+block with your own keystore before using it for anything installable.
+
+### Without a local SDK
+
+`.github/workflows/android.yml` runs the unit tests and assembles the debug
+APKs on every push, and uploads them as a workflow artifact
+(`photosphere-debug-apks`). Download it from the run's summary page, unzip, and
+`adb install` the APK for your device's ABI — no local toolchain needed. The
+workflow also runs on demand from the Actions tab.
+
+## Test
+
+```bash
+./gradlew :app:testDebugUnitTest   # local JVM tests, no device
+./gradlew :app:lintDebug           # Android lint
+```
+
+The unit tests cover the parts of the pipeline that are pure Kotlin: the sphere
+target plan, the projection maths, the alignment gate, the equirectangular fit,
+the stitch status mapping and the GPano XMP splice. Everything that needs real
+hardware — the camera, the rotation vector sensor, OpenCV's native stitch — is
+verified on a device. The **Orientation debug** button in the top-right of debug
+builds exists for exactly that: it puts the live sensor readout on screen so a
+leaked or stopped listener is visible immediately.
+
+An emulator is enough to check that the app launches, the permission gate works
+and the UI renders, but not to capture a sphere: the emulated camera and
+synthetic sensors will not produce frames that stitch. Guided capture needs a
+physical device with a gyroscope.
 
 ## Dependencies
 

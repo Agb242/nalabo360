@@ -1,0 +1,67 @@
+name: Android
+
+# Builds the debug APKs and runs the local unit tests. The APKs are uploaded as
+# workflow artifacts, so a device can be tested against without a local Android
+# SDK — download, unzip, `adb install`.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # AGP 8.7.3 targets JDK 17; the module compiles Java and Kotlin at 17 too.
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # The runner image already ships an SDK, but this pins the packages the
+      # build needs and accepts the licences non-interactively.
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "platforms;android-35 build-tools;35.0.0 platform-tools"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # Pure-JVM tests: sphere geometry, the alignment gate, the equirectangular
+      # fit and the GPano XMP splice. No emulator involved.
+      - name: Unit tests
+        run: ./gradlew :app:testDebugUnitTest
+
+      - name: Lint
+        run: ./gradlew :app:lintDebug
+        continue-on-error: true
+
+      # One APK per ABI — the OpenCV AAR carries native libraries for all of
+      # them, and app/build.gradle.kts splits them rather than shipping ~120 MB.
+      - name: Assemble debug APKs
+        run: ./gradlew :app:assembleDebug
+
+      - name: Upload APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: photosphere-debug-apks
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-report
+          path: app/build/reports/tests/
+          if-no-files-found: ignore
