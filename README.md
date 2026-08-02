@@ -127,13 +127,63 @@ app/src/main/java/com/n30dyn4m1c/photosphere/
 ├── MainActivity.kt              # entry point + runtime permission gate
 ├── PhotoSphereApplication.kt    # OpenCV native init
 ├── camera/CaptureScreen.kt      # CameraX preview + shutter
+├── sensor/
+│   ├── OrientationTracker.kt    # rotation vector -> yaw/pitch/roll StateFlow
+│   ├── OrientationState.kt      # lifecycle-aware Compose bindings
+│   └── OrientationDebugScreen.kt# live readout for on-device verification
 ├── storage/SphereImageStore.kt  # MediaStore writes + EXIF stamping
 └── ui/theme/                    # Material 3 theme
 ```
 
+## Device orientation
+
+[`OrientationTracker`](app/src/main/java/com/n30dyn4m1c/photosphere/sensor/OrientationTracker.kt)
+listens to `TYPE_ROTATION_VECTOR` — the *fused* sensor, so the attitude is
+absolute, north-referenced and drift-free — and publishes it as a
+`StateFlow<OrientationData>` of yaw, pitch and roll in degrees.
+
+Each event is converted with `getRotationMatrixFromVector`, then run through
+`remapCoordinateSystem` before the angles are read out:
+
+1. **Display rotation.** The sensor frame is bolted to the chassis, so the matrix
+   is rotated into the frame the user is actually looking at. Without it, tilting
+   a landscape phone upwards would register as roll.
+2. **Reference frame.** `OrientationReference.Screen` gives Android's own
+   convention, where "level" means the screen lying flat and face up. That is
+   the wrong pose for this app: holding the phone upright to shoot the horizon
+   parks it at pitch ≈ -90°, which is exactly the gimbal-lock singularity where
+   yaw and roll collapse into each other. The default
+   `OrientationReference.Camera` adds an `AXIS_X`/`AXIS_Z` remap so the angles
+   describe **where the rear camera points** — yaw is the bearing of the frame
+   being captured, pitch is 0° at the horizon — and the singularity moves to
+   straight up/down. The two remaps compose safely: every display remap is a
+   rotation about the device Z axis, which leaves the camera axis (-Z) alone.
+
+Angle ranges follow `SensorManager.getOrientation`: yaw and roll are
+`atan2`-derived and span -180°..180°, pitch is `asin`-derived and spans
+-90°..90°. Pitch is **negative when the camera is aimed above the horizon**.
+
+Events are delivered on a private `HandlerThread`, so a high sampling rate never
+competes with the UI. The tracker holds an OS listener registration and must be
+lifecycle-driven — `startListening()` when the screen is visible,
+`stopListening()` when it is not, or the gyro stays powered in the background.
+From Compose that is already wired up:
+
+```kotlin
+val orientation by rememberOrientationData()   // starts on STARTED, stops on STOP
+Text("yaw ${orientation.yawDegrees}")
+```
+
+Debug builds carry an **Orientation debug** button in the top-right corner of
+`MainActivity`, which swaps the capture UI for a live readout (artificial
+horizon, the three angles, sensor accuracy, and a sample counter that freezes if
+the listener is ever leaked or stopped early). The same screen has
+`@Preview`s for Android Studio. `BuildConfig.DEBUG` gates the button, so R8
+strips it from release builds.
+
 ## Not implemented yet
 
-- Sensor-driven capture guidance (target reticles, coverage map)
+- Capture guidance on top of the orientation layer (target reticles, coverage map)
 - OpenCV `Stitcher` pass over the captured frames
 - XMP **GPano** metadata on the stitched equirectangular output. This is what
   makes Google Photos and other viewers render an image as a sphere —

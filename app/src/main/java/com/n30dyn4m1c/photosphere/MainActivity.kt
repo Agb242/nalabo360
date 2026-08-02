@@ -15,10 +15,13 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.material3.Button
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
@@ -28,6 +31,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -38,6 +42,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import com.n30dyn4m1c.photosphere.camera.CaptureScreen
+import com.n30dyn4m1c.photosphere.sensor.OrientationDebugScreen
 import com.n30dyn4m1c.photosphere.ui.theme.PhotoSphereTheme
 
 class MainActivity : ComponentActivity() {
@@ -51,8 +56,40 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background,
                 ) {
-                    RequirePermissions(permissions = REQUIRED_PERMISSIONS) {
-                        CaptureScreen()
+                    // The orientation readout needs no permissions, so it sits
+                    // beside the permission gate rather than behind it.
+                    var showOrientationDebug by rememberSaveable { mutableStateOf(false) }
+
+                    Box(modifier = Modifier.fillMaxSize()) {
+                        if (showOrientationDebug) {
+                            OrientationDebugScreen()
+                        } else {
+                            RequirePermissions(permissions = REQUIRED_PERMISSIONS) {
+                                CaptureScreen()
+                            }
+                        }
+
+                        // Debug-only entry point. BuildConfig.DEBUG is a compile
+                        // time constant, so R8 drops this from release builds.
+                        if (BuildConfig.DEBUG) {
+                            FilledTonalButton(
+                                modifier = Modifier
+                                    .align(Alignment.TopEnd)
+                                    .systemBarsPadding()
+                                    .padding(12.dp),
+                                onClick = { showOrientationDebug = !showOrientationDebug },
+                            ) {
+                                Text(
+                                    stringResource(
+                                        if (showOrientationDebug) {
+                                            R.string.orientation_debug_close
+                                        } else {
+                                            R.string.orientation_debug_open
+                                        }
+                                    )
+                                )
+                            }
+                        }
                     }
                 }
             }
