@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <!-- Captured frames are large and reproducible; keep them out of backups. -->
+    <exclude domain="file" path="captures/" />
+    <exclude domain="external" path="captures/" />
+</full-backup-content>

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+        Compose supplies the real Material 3 theming (see ui/theme/Theme.kt).
+        This platform theme only needs to stay out of the way: no action bar and
+        a transparent system-bar treatment for edge-to-edge.
+    -->
+    <style name="Theme.PhotoSphere" parent="android:Theme.Material.NoActionBar">
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowBackground">@color/sphere_background</item>
+    </style>
+</resources>
