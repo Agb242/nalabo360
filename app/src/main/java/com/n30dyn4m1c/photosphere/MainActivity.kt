@@ -31,6 +31,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -42,8 +43,14 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import com.n30dyn4m1c.photosphere.camera.PhotoSphereCameraScreen
+import com.n30dyn4m1c.photosphere.result.PanoramaResultScreen
 import com.n30dyn4m1c.photosphere.sensor.OrientationDebugScreen
+import com.n30dyn4m1c.photosphere.storage.SphereImageStore
+import com.n30dyn4m1c.photosphere.storage.SphereImageStore.StitchedSphere
 import com.n30dyn4m1c.photosphere.ui.theme.PhotoSphereTheme
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 
@@ -56,41 +63,7 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background,
                 ) {
-                    // The orientation readout needs no permissions, so it sits
-                    // beside the permission gate rather than behind it.
-                    var showOrientationDebug by rememberSaveable { mutableStateOf(false) }
-
-                    Box(modifier = Modifier.fillMaxSize()) {
-                        if (showOrientationDebug) {
-                            OrientationDebugScreen()
-                        } else {
-                            RequirePermissions(permissions = REQUIRED_PERMISSIONS) {
-                                PhotoSphereCameraScreen()
-                            }
-                        }
-
-                        // Debug-only entry point. BuildConfig.DEBUG is a compile
-                        // time constant, so R8 drops this from release builds.
-                        if (BuildConfig.DEBUG) {
-                            FilledTonalButton(
-                                modifier = Modifier
-                                    .align(Alignment.TopEnd)
-                                    .systemBarsPadding()
-                                    .padding(12.dp),
-                                onClick = { showOrientationDebug = !showOrientationDebug },
-                            ) {
-                                Text(
-                                    stringResource(
-                                        if (showOrientationDebug) {
-                                            R.string.orientation_debug_close
-                                        } else {
-                                            R.string.orientation_debug_open
-                                        }
-                                    )
-                                )
-                            }
-                        }
-                    }
+                    PhotoSphereApp()
                 }
             }
         }
@@ -111,6 +84,87 @@ class MainActivity : ComponentActivity() {
             add(Manifest.permission.CAMERA)
             if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P) {
                 add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            }
+        }
+    }
+}
+
+/**
+ * The whole app: capture, then what to do with what came out.
+ *
+ * There are only two destinations, so this is a `when` over one piece of state
+ * rather than a navigation graph. The sphere held here is the app's single
+ * source of truth for "there is a finished photo waiting" — non-null puts the
+ * result screen up, and clearing it deletes the cached JPEG and returns to
+ * capture with a fresh buffer.
+ *
+ * The camera screen is behind the permission gate; the result screen is not
+ * separately gated, since the only way to reach it is through a capture that
+ * already passed.
+ */
+@Composable
+private fun PhotoSphereApp(modifier: Modifier = Modifier) {
+    val scope = rememberCoroutineScope()
+
+    // The orientation readout needs no permissions, so it sits beside the
+    // permission gate rather than behind it.
+    var showOrientationDebug by rememberSaveable { mutableStateOf(false) }
+
+    // Deliberately not `rememberSaveable`: on a configuration change the file is
+    // still in the cache, but a File is not something to smuggle through a
+    // Bundle, and re-showing a stale result would be worse than starting over.
+    var sphere by remember { mutableStateOf<StitchedSphere?>(null) }
+
+    /** Throws away the finished sphere and goes back to capture. */
+    fun discardSphere() {
+        val finished = sphere ?: return
+        sphere = null
+        // NonCancellable: this runs as the result screen is being torn down, and
+        // a several-megabyte JPEG left in the cache is exactly what the next
+        // stitch would have to clean up.
+        scope.launch(Dispatchers.IO + NonCancellable) {
+            SphereImageStore.deleteCachedSphere(finished.file)
+        }
+    }
+
+    Box(modifier = modifier.fillMaxSize()) {
+        when {
+            showOrientationDebug -> OrientationDebugScreen()
+
+            else -> RequirePermissions(
+                permissions = MainActivity.REQUIRED_PERMISSIONS,
+            ) {
+                val finished = sphere
+                if (finished == null) {
+                    PhotoSphereCameraScreen(onSphereReady = { sphere = it })
+                } else {
+                    PanoramaResultScreen(
+                        sphere = finished,
+                        onTakeAnother = { discardSphere() },
+                    )
+                }
+            }
+        }
+
+        // Debug-only entry point. BuildConfig.DEBUG is a compile time constant,
+        // so R8 drops this from release builds.
+        if (BuildConfig.DEBUG) {
+            FilledTonalButton(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .systemBarsPadding()
+                    .padding(12.dp),
+                onClick = { showOrientationDebug = !showOrientationDebug },
+            ) {
+                Text(
+                    stringResource(
+                        if (showOrientationDebug) {
+                            R.string.orientation_debug_close
+                        } else {
+                            R.string.orientation_debug_open
+                        }
+                    )
+                )
             }
         }
     }

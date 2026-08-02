@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Paths the app's FileProvider will hand out URIs for.
+
+    Only the finished spheres are shared: they are the one thing a user has a
+    reason to send elsewhere. The capture sessions alongside them stay private —
+    a share sheet has no business reaching forty raw frames.
+
+    `path` must match SphereImageStore.SPHERES_DIRECTORY.
+-->
+<paths>
+    <cache-path
+        name="spheres"
+        path="spheres/" />
+</paths>

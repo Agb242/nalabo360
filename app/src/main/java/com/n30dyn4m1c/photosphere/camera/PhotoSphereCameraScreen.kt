@@ -63,6 +63,7 @@ import com.n30dyn4m1c.photosphere.stitching.StitchStage
 import com.n30dyn4m1c.photosphere.stitching.StitchStatus
 import com.n30dyn4m1c.photosphere.storage.ImageBufferManager
 import com.n30dyn4m1c.photosphere.storage.SphereImageStore
+import com.n30dyn4m1c.photosphere.storage.SphereImageStore.StitchedSphere
 import com.n30dyn4m1c.photosphere.storage.rememberImageBufferManager
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
@@ -89,11 +90,21 @@ private const val TAG = "PhotoSphereCamera"
  * JPEGs — they are the stitcher's input, not photos the user asked to keep, so
  * they stay out of the gallery until there is a sphere to save.
  *
+ * Stitching ends the screen's involvement: the finished sphere goes to
+ * [onSphereReady] as a cached, GPano-tagged JPEG, and what happens to it —
+ * gallery, share sheet, or nothing — is the result screen's business.
+ *
  * The caller is responsible for the CAMERA permission; see
  * `MainActivity.RequirePermissions`.
+ *
+ * @param onSphereReady called on the main thread with a finished sphere, once
+ *   the frames it was built from have been cleared
  */
 @Composable
-fun PhotoSphereCameraScreen(modifier: Modifier = Modifier) {
+fun PhotoSphereCameraScreen(
+    onSphereReady: (StitchedSphere) -> Unit,
+    modifier: Modifier = Modifier,
+) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
@@ -273,7 +284,7 @@ fun PhotoSphereCameraScreen(modifier: Modifier = Modifier) {
     }
 
     /**
-     * Hands the buffered frames to the stitcher and saves what comes back.
+     * Hands the buffered frames to the stitcher and passes on what comes back.
      *
      * Started lazily so [stitchJob] is set before the body can reach its own
      * `finally` and clear it.
@@ -287,20 +298,38 @@ fun PhotoSphereCameraScreen(modifier: Modifier = Modifier) {
             try {
                 PhotoSphereStitcher.stitchPhotos(frames) { stitchProgress.value = it }
                     .onSuccess { sphere ->
-                        val saved = try {
+                        val stitched = try {
                             withContext(Dispatchers.IO) {
-                                SphereImageStore.saveSphere(context, sphere)
+                                SphereImageStore.writeStitchedSphere(context, sphere)
                             }
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            // A full sphere that will not fit on disk. The
+                            // frames survive, so a retry after clearing space
+                            // costs nothing more than the stitch.
+                            Log.e(TAG, "Could not write the stitched sphere", e)
+                            null
                         } finally {
                             sphere.recycle()
                         }
-                        // The frames have done their job; the sphere is what the
-                        // user asked for and it is now in the gallery.
+
+                        if (stitched == null) {
+                            snackbarHostState.showSnackbar(
+                                context.getString(
+                                    R.string.stitch_failed,
+                                    context.getString(R.string.stitch_error_write_failed),
+                                )
+                            )
+                            return@onSuccess
+                        }
+
+                        // The frames have done their job. Clearing before the
+                        // handover matters: this coroutine is cancelled the
+                        // moment the result screen replaces this one.
                         buffer.clear()
                         resetGuidance()
-                        snackbarHostState.showSnackbar(
-                            context.getString(R.string.stitch_saved, saved.displayName)
-                        )
+                        onSphereReady(stitched)
                     }
                     .onFailure { error ->
                         Log.e(TAG, "Stitch failed", error)

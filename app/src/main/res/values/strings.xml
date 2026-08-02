@@ -30,7 +30,6 @@
     <string name="stitch_stage_stitching">Aligning and blending frames…</string>
     <string name="stitch_stage_projecting">Shaping the equirectangular image…</string>
     <string name="stitch_cancel">Cancel</string>
-    <string name="stitch_saved">Sphere saved as %1$s</string>
     <string name="stitch_failed">Stitch failed. %1$s</string>
     <string name="stitch_error_need_more_images">Not enough overlapping frames — capture more of the sphere and try again.</string>
     <string name="stitch_error_alignment">The frames don\'t line up. Turn the phone on the spot rather than walking around, and avoid blank walls or open sky.</string>
@@ -39,6 +38,22 @@
     <string name="stitch_error_unreadable_input">A captured frame could not be read. Start a new sphere.</string>
     <string name="stitch_error_out_of_memory">Ran out of memory. Close other apps and try again with fewer frames.</string>
     <string name="stitch_error_unknown">Something went wrong (code %1$d).</string>
+    <string name="stitch_error_write_failed">The sphere couldn\'t be written to storage. Free up some space and try again.</string>
+
+    <!-- Result preview: what happens to a finished sphere. -->
+    <string name="result_title">Your 360 photo</string>
+    <string name="result_dimensions">%1$d × %2$d · equirectangular</string>
+    <string name="result_preview_description">Preview of the stitched 360° photo, flattened</string>
+    <string name="result_preview_failed">The preview couldn\'t be shown, but the photo is intact — export or share it to check.</string>
+    <string name="result_export">Export to gallery</string>
+    <string name="result_exporting">Saving…</string>
+    <string name="result_exported">Saved to gallery</string>
+    <string name="result_export_success">Saved to %1$s</string>
+    <string name="result_export_location">%1$s/%2$s</string>
+    <string name="result_export_failed">Couldn\'t save to the gallery: %1$s</string>
+    <string name="result_share">Share</string>
+    <string name="result_share_failed">No app on this device can receive a photo.</string>
+    <string name="result_take_another">New photo</string>
 
     <!-- Orientation debug screen. Developer-facing, reachable only in debuggable builds. -->
     <string name="orientation_debug_title">Orientation tracker</string>
