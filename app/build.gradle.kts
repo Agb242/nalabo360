@@ -59,6 +59,9 @@ android {
 
     buildFeatures {
         compose = true
+        // BuildConfig.DEBUG gates the orientation debug screen, so R8 can strip
+        // it from release builds.
+        buildConfig = true
     }
 
     packaging {
