@@ -2,6 +2,7 @@ package com.n30dyn4m1c.photosphere.storage
 
 import android.content.ContentValues
 import android.content.Context
+import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
@@ -9,6 +10,7 @@ import android.util.Log
 import androidx.camera.core.ImageCapture
 import androidx.exifinterface.media.ExifInterface
 import java.io.File
+import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -36,6 +38,13 @@ object SphereImageStore {
     /** Cache subdirectory holding one directory per capture session. */
     private const val SESSIONS_DIRECTORY = "sphere_sessions"
 
+    /**
+     * Encode quality for the finished sphere. High, because this is the only
+     * image of the run that is kept and it has already been through one
+     * generation of JPEG on the way in.
+     */
+    private const val SPHERE_JPEG_QUALITY = 95
+
     /** Output options plus the display name they will produce. */
     data class FrameOutputRequest(
         val outputOptions: ImageCapture.OutputFileOptions,
@@ -46,6 +55,12 @@ object SphereImageStore {
     data class TempFrameRequest(
         val outputOptions: ImageCapture.OutputFileOptions,
         val file: File,
+    )
+
+    /** A finished sphere, as it now exists in the gallery. */
+    data class SavedSphere(
+        val uri: Uri,
+        val displayName: String,
     )
 
     /** Identifier for one run of guided capture. Sorts chronologically. */
@@ -65,13 +80,29 @@ object SphereImageStore {
     fun sessionDirectory(context: Context, sessionId: String): File =
         File(File(context.cacheDir, SESSIONS_DIRECTORY), sessionId).apply { mkdirs() }
 
+    /** Path frame [index] of a session occupies. Zero-padded so it sorts. */
+    fun frameFile(directory: File, index: Int): File =
+        File(directory, "frame_%03d.jpg".format(index))
+
     /** Where frame [index] of a session should be written. */
     fun newTempFrameOptions(directory: File, index: Int): TempFrameRequest {
-        val file = File(directory, "frame_%03d.jpg".format(index))
+        val file = frameFile(directory, index)
         return TempFrameRequest(
             outputOptions = ImageCapture.OutputFileOptions.Builder(file).build(),
             file = file,
         )
+    }
+
+    /**
+     * Removes one session's directory and everything in it.
+     *
+     * Touches the filesystem — call off the main thread.
+     */
+    fun deleteSession(context: Context, sessionId: String) {
+        val session = File(File(context.cacheDir, SESSIONS_DIRECTORY), sessionId)
+        if (session.exists() && !session.deleteRecursively()) {
+            Log.w(TAG, "Could not clear session $sessionId")
+        }
     }
 
     /**
@@ -153,6 +184,92 @@ object SphereImageStore {
             .build()
 
         return FrameOutputRequest(outputOptions, displayName)
+    }
+
+    /**
+     * Writes a finished equirectangular sphere to the gallery.
+     *
+     * This is the one image of a run the user actually asked for, so it goes to
+     * MediaStore rather than the cache. On API 29+ the row is inserted pending
+     * and only published once the pixels are down, which keeps a half-written
+     * JPEG out of the gallery if the process dies mid-save.
+     *
+     * The "this is a 360 photo" marker viewers look for is XMP GPano, which
+     * [ExifInterface] cannot write — see [stampSphereMetadata]. Until that lands
+     * the file is a perfectly good 2:1 image that viewers will show flat.
+     *
+     * Blocking I/O and a full-size compress — call off the main thread. Throws
+     * [IOException] if MediaStore refuses the insert or the encode fails.
+     */
+    fun saveSphere(
+        context: Context,
+        bitmap: Bitmap,
+        quality: Int = SPHERE_JPEG_QUALITY,
+    ): SavedSphere {
+        val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        val displayName = "sphere_%s.jpg".format(timestamp)
+        val isScopedStorage = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+
+        val values = ContentValues().apply {
+            put(MediaStore.Images.Media.DISPLAY_NAME, displayName)
+            put(MediaStore.Images.Media.MIME_TYPE, MIME_TYPE)
+            put(MediaStore.Images.Media.WIDTH, bitmap.width)
+            put(MediaStore.Images.Media.HEIGHT, bitmap.height)
+            if (isScopedStorage) {
+                put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/$ALBUM")
+                put(MediaStore.Images.Media.IS_PENDING, 1)
+            }
+        }
+
+        val resolver = context.contentResolver
+        val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+            ?: throw IOException("MediaStore would not accept $displayName")
+
+        try {
+            val stream = resolver.openOutputStream(uri)
+                ?: throw IOException("Could not open $uri for writing")
+            stream.use { out ->
+                if (!bitmap.compress(Bitmap.CompressFormat.JPEG, quality, out)) {
+                    throw IOException("Could not encode the stitched sphere")
+                }
+            }
+        } catch (e: Exception) {
+            // A pending row nobody publishes is invisible but not free; drop it
+            // rather than leaving a zero-byte entry behind.
+            runCatching { resolver.delete(uri, null, null) }
+            throw e
+        }
+
+        if (isScopedStorage) {
+            resolver.update(
+                uri,
+                ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) },
+                null,
+                null,
+            )
+        }
+        stampSphereDescription(context, uri)
+
+        return SavedSphere(uri = uri, displayName = displayName)
+    }
+
+    /** Marks a saved sphere as this app's output, in EXIF. */
+    private fun stampSphereDescription(context: Context, uri: Uri) {
+        try {
+            context.contentResolver.openFileDescriptor(uri, "rw")?.use { descriptor ->
+                ExifInterface(descriptor.fileDescriptor).apply {
+                    setAttribute(ExifInterface.TAG_SOFTWARE, "PhotoSphere")
+                    setAttribute(
+                        ExifInterface.TAG_IMAGE_DESCRIPTION,
+                        "$ALBUM equirectangular panorama",
+                    )
+                    saveAttributes()
+                }
+            }
+        } catch (e: Exception) {
+            // Metadata is a nice-to-have; never lose the sphere over it.
+            Log.w(TAG, "Could not write EXIF for $uri", e)
+        }
     }
 
     /**

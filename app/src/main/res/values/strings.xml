@@ -21,6 +21,24 @@
     <string name="capture_orientation_unavailable">This device has no rotation vector sensor, so guided capture is unavailable.</string>
     <string name="capture_sphere_complete">Sphere complete</string>
     <string name="capture_restart">Start a new sphere</string>
+    <string name="capture_finish_stitch">Finish &amp; stitch</string>
+
+    <!-- Stitching. -->
+    <string name="stitch_title">Building your sphere</string>
+    <string name="stitch_stage_preparing">Getting ready…</string>
+    <string name="stitch_stage_reading">Reading frames (%1$d / %2$d)</string>
+    <string name="stitch_stage_stitching">Aligning and blending frames…</string>
+    <string name="stitch_stage_projecting">Shaping the equirectangular image…</string>
+    <string name="stitch_cancel">Cancel</string>
+    <string name="stitch_saved">Sphere saved as %1$s</string>
+    <string name="stitch_failed">Stitch failed. %1$s</string>
+    <string name="stitch_error_need_more_images">Not enough overlapping frames — capture more of the sphere and try again.</string>
+    <string name="stitch_error_alignment">The frames don\'t line up. Turn the phone on the spot rather than walking around, and avoid blank walls or open sky.</string>
+    <string name="stitch_error_camera_estimation">The frames couldn\'t be resolved into one camera view. Try capturing the sphere again.</string>
+    <string name="stitch_error_opencv_unavailable">Stitching is unavailable on this device — the OpenCV library did not load.</string>
+    <string name="stitch_error_unreadable_input">A captured frame could not be read. Start a new sphere.</string>
+    <string name="stitch_error_out_of_memory">Ran out of memory. Close other apps and try again with fewer frames.</string>
+    <string name="stitch_error_unknown">Something went wrong (code %1$d).</string>
 
     <!-- Orientation debug screen. Developer-facing, reachable only in debuggable builds. -->
     <string name="orientation_debug_title">Orientation tracker</string>
