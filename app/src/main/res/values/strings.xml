@@ -9,11 +9,18 @@
     <string name="permission_grant">Grant access</string>
     <string name="permission_open_settings">Open settings</string>
 
-    <string name="capture_shutter">Capture frame</string>
     <string name="capture_starting">Starting camera…</string>
-    <string name="capture_frames_taken">Frames captured: %1$d</string>
-    <string name="capture_saved">Saved to %1$s</string>
     <string name="capture_failed">Capture failed: %1$s</string>
+
+    <!-- Guided capture HUD. -->
+    <string name="capture_progress">%1$d / %2$d frames</string>
+    <string name="capture_hint_search">Move the reticle onto the marker</string>
+    <string name="capture_hint_hold">Hold still…</string>
+    <string name="capture_waiting_for_orientation">Finding your bearing…</string>
+    <string name="capture_low_accuracy">Compass unreliable — wave the phone in a figure eight</string>
+    <string name="capture_orientation_unavailable">This device has no rotation vector sensor, so guided capture is unavailable.</string>
+    <string name="capture_sphere_complete">Sphere complete</string>
+    <string name="capture_restart">Start a new sphere</string>
 
     <!-- Orientation debug screen. Developer-facing, reachable only in debuggable builds. -->
     <string name="orientation_debug_title">Orientation tracker</string>
