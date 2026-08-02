@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Photo Sphere</string>
+
+    <string name="permission_camera_title">Camera access needed</string>
+    <string name="permission_camera_rationale">Photo Sphere stitches a 360° panorama from frames it captures as you pan the device, so it needs access to the camera.</string>
+    <string name="permission_camera_denied_permanently">Camera access is turned off for this app. Enable it in Settings to capture a sphere.</string>
+    <string name="permission_storage_rationale">Storage access is needed to save finished spheres to your gallery on this version of Android.</string>
+    <string name="permission_grant">Grant access</string>
+    <string name="permission_open_settings">Open settings</string>
+
+    <string name="capture_shutter">Capture frame</string>
+    <string name="capture_starting">Starting camera…</string>
+    <string name="capture_frames_taken">Frames captured: %1$d</string>
+    <string name="capture_saved">Saved to %1$s</string>
+    <string name="capture_failed">Capture failed: %1$s</string>
+</resources>
