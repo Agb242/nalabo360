@@ -41,7 +41,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LifecycleResumeEffect
-import com.n30dyn4m1c.photosphere.camera.CaptureScreen
+import com.n30dyn4m1c.photosphere.camera.PhotoSphereCameraScreen
 import com.n30dyn4m1c.photosphere.sensor.OrientationDebugScreen
 import com.n30dyn4m1c.photosphere.ui.theme.PhotoSphereTheme
 
@@ -65,7 +65,7 @@ class MainActivity : ComponentActivity() {
                             OrientationDebugScreen()
                         } else {
                             RequirePermissions(permissions = REQUIRED_PERMISSIONS) {
-                                CaptureScreen()
+                                PhotoSphereCameraScreen()
                             }
                         }
 

@@ -2,10 +2,10 @@
 
 Android app scaffold for capturing and stitching 360° photo spheres.
 
-This repository currently contains the **base project configuration**: Gradle
-setup, manifest permissions, runtime permission handling, and a working CameraX
-capture screen that saves frames through MediaStore. The stitching pipeline
-itself is not implemented yet.
+The app currently covers **guided capture**: a CameraX viewfinder with a target
+alignment overlay that walks the user around the sphere and fires the shutter
+by itself whenever the camera settles on the next frame. The stitching pipeline
+is not implemented yet.
 
 ## Requirements
 
@@ -96,6 +96,7 @@ Declared in
 | --- | --- | --- |
 | `CAMERA` | runtime | Frame capture |
 | `HIGH_SAMPLING_RATE_SENSORS` | **normal** (install-time, API 31+) | >200 Hz gyro/accel sampling to track device attitude between frames |
+| `VIBRATE` | **normal** (install-time) | Haptic tick confirming an automatic capture |
 | `WRITE_EXTERNAL_STORAGE` | runtime, `maxSdkVersion="28"` | Saving on pre-scoped-storage devices |
 | `READ_EXTERNAL_STORAGE` | runtime, `maxSdkVersion="32"` | Reading spheres this app did not create |
 | `READ_MEDIA_IMAGES` | runtime (API 33+) | Same, on Android 13+ |
@@ -104,8 +105,11 @@ Declared in
 time, and requesting it at runtime always returns "denied". Declaring it is
 sufficient.
 
-Saving uses MediaStore (`Pictures/PhotoSphere/`) on every API level, so from
-API 29 up no storage permission is requested at all.
+Frames captured during a run are written to the app's own cache
+(`cacheDir/sphere_sessions/<session>/`), which needs no permission at all —
+they are stitcher input, not photos the user asked to keep. MediaStore
+(`Pictures/PhotoSphere/`) is reserved for finished output; it works on every API
+level, so from API 29 up no storage permission is requested either.
 
 ### Runtime handling
 
@@ -126,12 +130,19 @@ gates the capture UI. It:
 app/src/main/java/com/n30dyn4m1c/photosphere/
 ├── MainActivity.kt              # entry point + runtime permission gate
 ├── PhotoSphereApplication.kt    # OpenCV native init
-├── camera/CaptureScreen.kt      # CameraX preview + shutter
+├── camera/
+│   ├── PhotoSphereCameraScreen.kt # CameraX preview + the capture loop
+│   ├── TargetOverlay.kt         # reticle, target markers, dwell arc
+│   ├── SphereTarget.kt          # the sphere's target list
+│   ├── SphereProjection.kt      # attitude + target -> screen position
+│   ├── AlignmentGate.kt         # 2° / 300 ms shutter rule
+│   ├── CameraOptics.kt          # field of view from the camera's optics
+│   └── CaptureFeedback.kt       # shutter sound + haptic tick
 ├── sensor/
 │   ├── OrientationTracker.kt    # rotation vector -> yaw/pitch/roll StateFlow
 │   ├── OrientationState.kt      # lifecycle-aware Compose bindings
 │   └── OrientationDebugScreen.kt# live readout for on-device verification
-├── storage/SphereImageStore.kt  # MediaStore writes + EXIF stamping
+├── storage/SphereImageStore.kt  # cache sessions, MediaStore writes, EXIF
 └── ui/theme/                    # Material 3 theme
 ```
 
@@ -181,9 +192,51 @@ the listener is ever leaked or stopped early). The same screen has
 `@Preview`s for Android Studio. `BuildConfig.DEBUG` gates the button, so R8
 strips it from release builds.
 
+## Guided capture
+
+[`PhotoSphereCameraScreen`](app/src/main/java/com/n30dyn4m1c/photosphere/camera/PhotoSphereCameraScreen.kt)
+binds a CameraX `Preview` and `ImageCapture` to the activity lifecycle and runs
+the loop that turns device attitude into frames. The user never presses a
+shutter: they move the reticle onto the next marker and hold.
+
+**The target list.** [`SphereTargetPlan`](app/src/main/java/com/n30dyn4m1c/photosphere/camera/SphereTarget.kt)
+lays out 44 targets on rings at 0°, ±30° and ±60° of elevation. Yaw spacing is
+30° at the equator and widens by `1 / cos(elevation)` above and below it, so
+frames stay a constant *angular* distance apart instead of bunching up as the
+rings shrink. Rings are swept in alternating directions, and the whole plan is
+rotated to start at whatever bearing the user is already facing — capture opens
+with the reticle on the first marker rather than asking for magnetic north.
+
+**Where a marker goes on screen.** [`SphereProjection`](app/src/main/java/com/n30dyn4m1c/photosphere/camera/SphereProjection.kt)
+rotates a target's direction out of the world frame into the camera's own frame
+and divides through by depth — the same rectilinear projection the lens
+performs, so a marker lands on the pixel its target will actually occupy. The
+focal length comes from the camera's reported optics
+([`CameraOptics`](app/src/main/java/com/n30dyn4m1c/photosphere/camera/CameraOptics.kt)),
+falling back to typical phone values if the camera will not describe itself.
+Roll is included, so tilting the phone turns the markers with the scene; it is
+deliberately excluded from the *distance* measure, since turning the phone in
+its own plane does not change where it is aimed.
+
+**The trigger.** [`AlignmentGate`](app/src/main/java/com/n30dyn4m1c/photosphere/camera/AlignmentGate.kt)
+fires once the aim has been within **2°** of the active target continuously for
+**300 ms**. The dwell is what keeps a frame from being taken mid-swing: at a
+normal pan rate the reticle crosses a 2° window in far less than 300 ms, so only
+a deliberate stop trips it. Any sample outside the window clears the timer
+outright. On success the shutter sound and a haptic tick fire together, the
+marker turns green, and focus animates onto the next target.
+
+**Frames** are written full-resolution to the session's cache directory with the
+capture attitude stamped into EXIF `UserComment`, giving the stitcher a starting
+guess at where each frame belongs. Stale sessions are cleared when a new run
+starts.
+
+The geometry, the target plan and the trigger rule are pure Kotlin, and are
+covered by local unit tests in
+[`app/src/test/java/com/n30dyn4m1c/photosphere/camera/`](app/src/test/java/com/n30dyn4m1c/photosphere/camera).
+
 ## Not implemented yet
 
-- Capture guidance on top of the orientation layer (target reticles, coverage map)
 - OpenCV `Stitcher` pass over the captured frames
 - XMP **GPano** metadata on the stitched equirectangular output. This is what
   makes Google Photos and other viewers render an image as a sphere —

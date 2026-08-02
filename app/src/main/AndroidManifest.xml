@@ -14,6 +14,12 @@
     <uses-permission android:name="android.permission.HIGH_SAMPLING_RATE_SENSORS" />
 
     <!--
+        The haptic tick that confirms an automatic capture. Normal permission,
+        granted at install time.
+    -->
+    <uses-permission android:name="android.permission.VIBRATE" />
+
+    <!--
         Storage. On API 29+ the app writes through MediaStore and needs no
         storage permission at all, so WRITE is capped at API 28 and READ is
         capped at API 32 (it only covers reading spheres this app did not
