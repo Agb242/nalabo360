@@ -3,6 +3,7 @@ package com.n30dyn4m1c.photosphere.storage
 import android.content.Context
 import android.graphics.Bitmap
 import android.util.Log
+import androidx.camera.core.ImageCapture
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
@@ -116,6 +117,73 @@ class ImageBufferManager(
             val directory = SphereImageStore.sessionDirectory(appContext, _sessionId.value)
             SphereImageStore.newTempFrameOptions(directory, index)
         }
+
+    /**
+     * Reserves [count] candidate files for frame [index], one per burst shot.
+     *
+     * The canonical `frame_%03d.jpg` name is left for the winner; the
+     * candidates sit alongside it as `frame_%03d_t{k}.jpg` until
+     * [commitBestFrame] promotes one. Callers that only want a single frame
+     * should keep using [reserveFrame] and skip the burst machinery.
+     */
+    suspend fun reserveBurstFrames(index: Int, count: Int): List<SphereImageStore.TempFrameRequest> {
+        require(count > 0) { "burst size must be positive, was $count" }
+        return withContext(ioDispatcher) {
+            val directory = SphereImageStore.sessionDirectory(appContext, _sessionId.value)
+            List(count) { burst ->
+                val file = SphereImageStore.burstFrameFile(directory, index, burst)
+                SphereImageStore.TempFrameRequest(
+                    outputOptions = ImageCapture.OutputFileOptions.Builder(file).build(),
+                    file = file,
+                )
+            }
+        }
+    }
+
+    /**
+     * Keeps [best] as frame [index]'s canonical file and buffers it.
+     *
+     * [best] must be one of the files [reserveBurstFrames] handed back (or, for
+     * a single-frame session, the [reserveFrame] file). It is promoted onto the
+     * canonical `frame_%03d.jpg` name — within its own directory, so a frame
+     * whose session was superseded mid-burst stays put and [record]'s
+     * session check still rejects it — and the rest of the burst is deleted, so
+     * the session holds exactly one file per index. The stitcher reads the
+     * buffer's [frames], never the directory.
+     */
+    suspend fun commitBestFrame(
+        best: File,
+        index: Int,
+        orientation: OrientationData,
+    ): BufferedFrame? = withContext(ioDispatcher) {
+        val directory = best.parentFile
+        val canonical = directory?.let { SphereImageStore.frameFile(it, index) }
+
+        var winner = best
+        if (canonical != null && best != canonical) {
+            if (canonical.exists() && !canonical.delete()) {
+                Log.w(TAG, "Could not replace ${canonical.name}")
+            }
+            if (best.renameTo(canonical)) {
+                winner = canonical
+            } else {
+                Log.w(TAG, "Could not promote ${best.name} to ${canonical.name}")
+            }
+        }
+
+        // The burst candidates that lost. Deleting a sibling here never touches
+        // the winner: burst names always carry the `_t{k}` suffix, the canonical
+        // name never does.
+        directory?.listFiles()?.forEach { sibling ->
+            if (sibling != winner &&
+                sibling.name.startsWith(SphereImageStore.burstPrefix(index))
+            ) {
+                if (!sibling.delete()) Log.w(TAG, "Could not delete burst sibling ${sibling.name}")
+            }
+        }
+
+        winner
+    }.let { record(it, index, orientation) }
 
     /**
      * Adds a frame that is already on disk, stamping its attitude into EXIF.

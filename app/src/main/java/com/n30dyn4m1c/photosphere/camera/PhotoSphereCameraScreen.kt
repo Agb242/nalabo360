@@ -3,7 +3,10 @@ package com.n30dyn4m1c.photosphere.camera
 import android.content.Context
 import android.os.SystemClock
 import android.util.Log
+import androidx.camera.camera2.interop.Camera2Interop
+import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
@@ -74,6 +77,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -146,6 +150,11 @@ fun PhotoSphereCameraScreen(
     val sessionId by buffer.sessionId.collectAsStateWithLifecycle()
 
     var imageCapture by remember { mutableStateOf<ImageCapture?>(null) }
+    // The locked capture settings this device settled on, and the Camera the
+    // locks were bound with. Read by the capture loop, and by the HUD to say
+    // what the session is holding.
+    var captureProfile by remember { mutableStateOf<SphereCaptureProfile?>(null) }
+    var boundCamera by remember { mutableStateOf<Camera?>(null) }
     var plan by remember { mutableStateOf<SphereTargetPlan?>(null) }
     var activeIndex by remember { mutableIntStateOf(0) }
     var isHolding by remember { mutableStateOf(false) }
@@ -180,9 +189,20 @@ fun PhotoSphereCameraScreen(
             return@LaunchedEffect
         }
 
-        val preview = Preview.Builder().build().apply {
-            setSurfaceProvider(previewView.surfaceProvider)
-        }
+        val profile = resolveSphereCaptureProfile(context)
+        captureProfile = profile
+
+        // Exposure, white balance and focus are locked for the whole session
+        // (see SphereCaptureProfile): a sphere's seams are exposure and colour
+        // seams, so no frame is allowed to re-meter on its own. The locks ride
+        // in the preview's repeating request as well as the stills', so the
+        // viewfinder shows exactly what each frame will record.
+        val preview = Preview.Builder()
+            .also { applySphereCaptureOptions(Camera2Interop.Extender(it), profile) }
+            .build()
+            .apply {
+                setSurfaceProvider(previewView.surfaceProvider)
+            }
         val capture = ImageCapture.Builder()
             .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
             // Frames are stitched, so a flash firing on some of them would leave
@@ -194,17 +214,20 @@ fun PhotoSphereCameraScreen(
                     .build()
             )
             .setTargetRotation(context.currentDisplayRotation())
+            .also { applySphereCaptureOptions(Camera2Interop.Extender(it), profile) }
+            .also { applyStillImageOptions(Camera2Interop.Extender(it), profile) }
             .build()
 
         try {
             cameraProvider.unbindAll()
-            cameraProvider.bindToLifecycle(
+            val camera = cameraProvider.bindToLifecycle(
                 lifecycleOwner,
                 CameraSelector.DEFAULT_BACK_CAMERA,
                 preview,
                 capture,
             )
             imageCapture = capture
+            boundCamera = camera
         } catch (e: Exception) {
             Log.e(TAG, "Camera binding failed", e)
             snackbarHostState.showSnackbar(
@@ -224,7 +247,16 @@ fun PhotoSphereCameraScreen(
     // the StateFlow simply conflates the samples that arrive meanwhile.
     LaunchedEffect(imageCapture) {
         val capture = imageCapture ?: return@LaunchedEffect
+        val profile = captureProfile ?: return@LaunchedEffect
         val gate = AlignmentGate()
+
+        // Devices that cannot park focus at infinity hold it at the first scene
+        // instead. AE and AWB are already locked by the session, so this pins
+        // the last free variable before any frame is taken; the trigger lands
+        // before the first dwell can complete, so it cannot race a shutter.
+        if (profile.focusMode == FocusMode.LOCK_ON_FIRST) {
+            runCatching { boundCamera?.lockFocusOnCenter(previewView) }
+        }
 
         tracker.orientation.collect { orientation ->
             if (!orientation.hasFix) return@collect
@@ -270,6 +302,7 @@ fun PhotoSphereCameraScreen(
                 buffer = buffer,
                 index = index,
                 orientation = orientation,
+                burstPerTarget = profile.burstPerTarget,
             )
             alignment = alignment.copy(isCapturing = false)
 
@@ -428,6 +461,12 @@ fun PhotoSphereCameraScreen(
                     isHolding = isHolding,
                     accuracy = accuracy,
                 ),
+                lockBadge = when (captureProfile?.focusMode) {
+                    FocusMode.FIXED_INFINITY -> stringResource(R.string.capture_lock_infinity)
+                    FocusMode.LOCK_ON_FIRST -> stringResource(R.string.capture_lock_first)
+                    FocusMode.FIXED_FOCUS -> stringResource(R.string.capture_lock_fixed)
+                    null -> null
+                },
                 isComplete = isComplete,
                 // Below this the stitcher has nothing to work with: a handful of
                 // frames from one corner of the sphere cannot be registered.
@@ -452,6 +491,7 @@ private fun CaptureHud(
     capturedCount: Int,
     totalTargets: Int,
     hint: String,
+    lockBadge: String?,
     isComplete: Boolean,
     canStitch: Boolean,
     onFinish: () -> Unit,
@@ -480,6 +520,17 @@ private fun CaptureHud(
                         .clip(RoundedCornerShape(50)),
                     color = Color(0xFF3DDC84),
                     trackColor = Color.White.copy(alpha = 0.25f),
+                )
+            }
+            if (lockBadge != null) {
+                Text(
+                    text = lockBadge,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = Color(0xFF8BC34A),
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .background(Color.Black.copy(alpha = 0.45f))
+                        .padding(horizontal = 10.dp, vertical = 4.dp),
                 )
             }
         }
@@ -683,25 +734,94 @@ private fun captureHint(
  * into the file's EXIF: the stitcher gets a free initial guess at where each
  * frame belongs, which is worth far more than the couple of milliseconds it
  * costs here.
+ *
+ * With [burstPerTarget] > 1 the target is shot [burstPerTarget] times at the
+ * same locked settings and the sharpest of the burst is kept. The losers are
+ * deleted in [ImageBufferManager.commitBestFrame], so the session still holds
+ * one file per index. A frame halfway through its burst that fails leaves the
+ * reserved candidates behind; they are deleted here so the session directory
+ * stays clean.
  */
 private suspend fun ImageCapture.saveFrame(
     context: Context,
     buffer: ImageBufferManager,
     index: Int,
     orientation: OrientationData,
-): Result<File> = try {
-    val request = buffer.reserveFrame(index)
+    burstPerTarget: Int,
+): Result<File> {
+    val requests = try {
+        if (burstPerTarget > 1) {
+            buffer.reserveBurstFrames(index, burstPerTarget)
+        } else {
+            listOf(buffer.reserveFrame(index))
+        }
+    } catch (e: Exception) {
+        return Result.failure(e)
+    }
 
-    takePictureTo(context, request.outputOptions)
+    return try {
+        requests.forEach { takePictureTo(context, it.outputOptions) }
 
-    buffer.record(file = request.file, index = index, orientation = orientation)
-    Result.success(request.file)
-} catch (e: CancellationException) {
-    // Leaving the screen mid-shutter is not a capture failure; let the
-    // cancellation travel rather than reporting it to the user.
-    throw e
-} catch (e: Exception) {
-    Result.failure(e)
+        val best = if (burstPerTarget > 1) {
+            // Scoring decodes each candidate, which is cheap next to the captures
+            // that just ran but is still real work — keep it off the main thread.
+            withContext(Dispatchers.Default) {
+                SharpnessSelection.pickSharpest(requests.map { it.file })
+            }
+        } else {
+            requests.first().file
+        }
+
+        buffer.commitBestFrame(best, index, orientation)
+        Result.success(best)
+    } catch (e: CancellationException) {
+        // Leaving the screen mid-shutter is not a capture failure; let the
+        // cancellation travel rather than reporting it to the user.
+        throw e
+    } catch (e: Exception) {
+        // Half a burst written, none of it buffered: clear the candidates so the
+        // session directory does not accumulate rejected frames.
+        withContext(NonCancellable + Dispatchers.IO) {
+            requests.forEach { request ->
+                if (request.file.exists() && !request.file.delete()) {
+                    Log.w(TAG, "Could not delete failed burst file ${request.file.name}")
+                }
+            }
+        }
+        Result.failure(e)
+    }
+}
+
+/**
+ * Locks autofocus at the centre of the preview, awaiting convergence.
+ *
+ * Used on devices without `AF_MODE_OFF`, where focus is the one variable the
+ * session cannot pin from the start. AE and AWB are already held by the session
+ * request, so the trigger only moves focus — the metering region is the centre
+ * of the viewfinder, where the alignment gate insists the next frame be aimed
+ * anyway. After the trigger completes in `AF_MODE_AUTO` the lens stays where it
+ * is until another trigger comes along, which is what GCam's tap-to-focus lock
+ * amounts to.
+ */
+private suspend fun Camera.lockFocusOnCenter(previewView: PreviewView) {
+    val point = previewView.meteringPointFactory.createPoint(
+        previewView.width / 2f,
+        previewView.height / 2f,
+    )
+    val future = cameraControl.startFocusAndMetering(
+        FocusMeteringAction.Builder(point, FocusMeteringAction.FLAG_AF).build(),
+    )
+    suspendCancellableCoroutine { continuation ->
+        future.addListener(
+            {
+                // A failed focus sweep is not worth failing the session over; the
+                // lens just stays where auto left it.
+                runCatching { future.get() }
+                continuation.resume(Unit)
+            },
+            ContextCompat.getMainExecutor(previewView.context),
+        )
+    }
 }
 
 /** Suspending [ImageCapture.takePicture]; the callback form fits nothing here. */

@@ -14,6 +14,9 @@
 
     <!-- Guided capture HUD. -->
     <string name="capture_progress">%1$d / %2$d frames</string>
+    <string name="capture_lock_infinity">Exposure &amp; white balance locked · focus at infinity</string>
+    <string name="capture_lock_first">Exposure &amp; white balance locked · focus locked</string>
+    <string name="capture_lock_fixed">Exposure &amp; white balance locked · fixed-focus lens</string>
     <string name="capture_hint_search">Move the reticle onto the marker</string>
     <string name="capture_hint_hold">Hold still…</string>
     <string name="capture_waiting_for_orientation">Finding your bearing…</string>

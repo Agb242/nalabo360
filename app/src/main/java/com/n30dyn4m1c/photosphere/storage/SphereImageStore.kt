@@ -117,6 +117,20 @@ object SphereImageStore {
     }
 
     /**
+     * Path one candidate of frame [index]'s burst occupies.
+     *
+     * Burst shots sit alongside the canonical `frame_%03d.jpg` name as
+     * `frame_%03d_t{k}.jpg` until a winner is chosen and promoted — the plain
+     * name is left for the frame that is actually kept, so the session holds
+     * exactly one file per index.
+     */
+    fun burstFrameFile(directory: File, index: Int, burst: Int): File =
+        File(directory, "frame_%03d_t%d.jpg".format(index, burst))
+
+    /** Prefix shared by every candidate of frame [index]'s burst. */
+    fun burstPrefix(index: Int): String = "frame_%03d_t".format(index)
+
+    /**
      * Removes one session's directory and everything in it.
      *
      * Touches the filesystem — call off the main thread.
