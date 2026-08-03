@@ -18,9 +18,10 @@ import java.io.OutputStream
  * actually cover: for a full equirectangular frame it is the whole image, which
  * is what [forFullPano] produces. A partial sphere would keep the full-pano
  * dimensions at the size the *complete* sphere would have been and place the
- * covered rectangle inside it — this pipeline never emits that, because
- * `EquirectangularFit` already letterboxes the covered band into a full 2:1
- * canvas, so the cropped area and the image are the same thing.
+ * covered rectangle inside it — this pipeline never emits that, because the
+ * renderer draws straight into a full 2:1 canvas and leaves the parts the
+ * capture never reached black, so the cropped area and the image are the same
+ * thing.
  */
 data class GPanoMetadata(
     /** Width the complete sphere occupies. */

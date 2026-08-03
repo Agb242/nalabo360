@@ -107,7 +107,9 @@ implementation(libs.opencv)   // org.opencv:opencv:4.12.0
 ```
 
 Note the coordinates: the group is `org.opencv` and the artifact is `opencv`
-(not `opencv-android`, which is an unofficial mirror). The AAR is ~120 MB
+(not `opencv-android`, which is an unofficial mirror). Note also what is *not*
+in it: there is no `org.opencv.stitching` — see
+[Stitching](#stitching) for what this project does instead. The AAR is ~120 MB
 because it bundles native libraries for all four ABIs — the ABI split above
 keeps the installed APK closer to ~30 MB.
 
@@ -190,8 +192,9 @@ app/src/main/java/com/n30dyn4m1c/photosphere/
 │   ├── OrientationState.kt      # lifecycle-aware Compose bindings
 │   └── OrientationDebugScreen.kt# live readout for on-device verification
 ├── stitching/
-│   ├── PhotoSphereStitcher.kt   # OpenCV Stitcher pass, statuses, progress
-│   └── EquirectangularFit.kt    # placing a panorama in a 2:1 canvas
+│   ├── PhotoSphereStitcher.kt   # the stitch: read, render, statuses, progress
+│   ├── SphericalGeometry.kt     # camera basis, canvas mapping, frame footprints
+│   └── EquirectangularRenderer.kt # projecting frames onto the sphere, blending
 ├── metadata/
 │   └── GPanoXmpInjector.kt      # GPano XMP into the JPEG header, no re-encode
 ├── result/
@@ -302,40 +305,65 @@ several hundred megabytes of heap. It owns the session id, so `clear()` (frames
 consumed by a successful stitch) and `cancelSession()` (start over — the whole
 session directory goes) are the only two ways frames leave.
 
-**The stitch.** [`PhotoSphereStitcher`](app/src/main/java/com/n30dyn4m1c/photosphere/stitching/PhotoSphereStitcher.kt)
-runs OpenCV's `Stitcher` in `PANORAMA` mode on `Dispatchers.Default`. That mode
-warps onto a sphere rather than a plane, which is what makes the result
-equirectangular geometry in the first place. Frames are decoded subsampled to
-1024 px on the long edge and rotated upright from their EXIF before they become
-`Mat`s — OpenCV holds every frame plus its warped copy at once, so full
-resolution is a reliable way to run a phone out of memory.
+**Why not OpenCV's `Stitcher`.** Because there isn't one. The stitching module
+is absent from every prebuilt OpenCV for Android: `org.opencv:opencv` ships Java
+bindings for core, imgproc, features2d, calib3d and the rest, but no
+`org.opencv.stitching` package — and `libopencv_java4.so` contains none of the
+pipeline's native symbols either, so a JNI shim would not link. Independently
+built AARs are the same. `cv::Stitcher` is, in practice, a desktop API, and the
+local OpenCV SDK ("Option B" above) does not change that.
+
+**What this does instead.** Guided capture already knows where the camera was
+pointing for every frame — the shutter only fires when the device is held on a
+known target — which turns the expensive half of stitching, solving for each
+camera's rotation, into something already measured. What is left is a
+reprojection.
+
+[`SphericalGeometry`](app/src/main/java/com/n30dyn4m1c/photosphere/stitching/SphericalGeometry.kt)
+holds the maths: a `CameraBasis` built from a frame's yaw/pitch/roll, the
+mapping between canvas pixels and directions on the sphere, and the *footprint* —
+the block of canvas a frame can reach. The footprint is found by walking the
+frame's border rather than its four corners, since at a wide field of view the
+middle of an edge reaches a higher latitude than either corner does, and it
+handles the two cases that break a naive bounding box: a frame straddling the
+±180° seam comes back as one unwrapped range, and a frame containing a pole opens
+out to the full width, because every longitude passes underneath it.
+
+[`EquirectangularRenderer`](app/src/main/java/com/n30dyn4m1c/photosphere/stitching/EquirectangularRenderer.kt)
+does the painting. Every output pixel is a direction; for each frame that
+direction is rotated into the frame's own axes and divided through by depth,
+which gives the pixel that looked at it, and `Imgproc.remap` samples it. Overlaps
+resolve to a weighted mean whose weight falls to zero at each frame's border, so
+a seam becomes a cross-fade rather than a line — and a pixel only one frame
+reached still comes out at full strength, because the weight divides back out.
+
+The result is equirectangular *by construction* rather than by cropping
+something else into shape: a pixel's row is its latitude, so an incomplete sphere
+is black exactly where it was not shot, at the right elevation. The accuracy
+ceiling is the rotation vector sensor, which is fused and drift-free but not
+perfect; residual error shows up as soft doubling inside the overlaps rather
+than as a broken panorama.
+
+**Memory.** A 4096-wide canvas needs 100 MB of float accumulator if it is held
+at once, which is exactly the allocation that ends a stitch on a mid-range
+phone. The canvas is built in horizontal bands instead, so only the band being
+accumulated exists in float and the peak is a few megabytes. The canvas is also
+never rendered wider than the frames justify — a 1024 px frame across 66° carries
+about 15.5 px per degree, so a full turn is worth ~5600 px, and rendering beyond
+that would only interpolate.
 
 Failures come back as a failed `Result` carrying a `StitchException` with a
-`StitchStatus`. The first four statuses are OpenCV's own return codes, so a
-`ERR_NEED_MORE_IMAGES` ("not enough overlap") and a `ERR_HOMOGRAPHY_EST_FAIL`
-("the camera moved between frames instead of turning on the spot") reach the
-user as different sentences; the rest cover this pipeline's own failures —
-native library missing, unreadable frame, out of memory.
-
-**The 2:1 canvas.** OpenCV returns the bounding box of whatever was warped onto
-the sphere, black where the capture did not reach.
-[`EquirectangularFit`](app/src/main/java/com/n30dyn4m1c/photosphere/stitching/EquirectangularFit.kt)
-crops that to its content and centres it in the smallest 2:1 canvas that holds
-it. It deliberately does not stretch: the ±60° capture plan covers 360°×120°, and
-scaling that to fill a 2:1 frame would put every pixel at the wrong latitude.
-Uncovered poles stay black. The geometry is pure integer arithmetic and is unit
-tested.
+`StitchStatus`: too little of the sphere covered, a frame that would not decode,
+the native library missing, out of memory.
 
 **In the UI.** A **Finish & stitch** button appears in
-`PhotoSphereCameraScreen` once six frames are buffered — enough for a stitch to
-have something to register — and a modal with a progress indicator covers the
-screen while the work runs. Frame decoding reports real progress; everything
-inside OpenCV's `stitch` call is one opaque block, so that stage shows an
-indeterminate spinner rather than a bar that lies. Cancelling takes effect at the
-next stage boundary, since the native call cannot be interrupted partway. On
-success the sphere is written to the cache as a GPano-tagged JPEG, the buffered
-frames are deleted, and the result screen takes over; on failure the frames are
-kept, because the usual fix is to capture a few more and try again.
+`PhotoSphereCameraScreen` once six frames are buffered, and a modal with a
+progress indicator covers the screen while the work runs. Both long stages report
+real progress — one frame at a time while decoding, one band at a time while
+rendering. Cancelling takes effect at the next band boundary. On success the
+sphere is written to the cache as a GPano-tagged JPEG, the buffered frames are
+deleted, and the result screen takes over; on failure the frames are kept,
+because the usual fix is to capture a few more and try again.
 
 ## The finished sphere
 
@@ -349,9 +377,9 @@ entropy-coded scan — through verbatim. **Nothing is decoded or re-encoded**, s
 tagging costs no image quality on a file that has already been through one
 generation of JPEG on the way in. Eight properties are written:
 `UsePanoramaViewer`, `ProjectionType`, `FullPano{Width,Height}Pixels` and the
-four `CroppedArea*` values, which cover the whole image because
-`EquirectangularFit` has already letterboxed the covered band into a full 2:1
-canvas. It is plain `java.io`, so it is covered by local unit tests that assert
+four `CroppedArea*` values, which cover the whole image because the renderer
+draws straight into a full 2:1 canvas and leaves what the capture never reached
+black. It is plain `java.io`, so it is covered by local unit tests that assert
 the image data comes out byte-identical.
 
 **The result screen.** [`PanoramaResultScreen`](app/src/main/java/com/n30dyn4m1c/photosphere/result/PanoramaResultScreen.kt)
@@ -381,6 +409,16 @@ read grant attached.
 
 ## Not implemented yet
 
-- Using the captured yaw/pitch/roll to seed the stitcher's camera estimates.
-  `ImageBufferManager` records it and EXIF carries it, but OpenCV's Java
-  bindings do not expose the camera parameters that would let it be fed in.
+- **Refining the frame poses against the image content.** Frames are placed from
+  the rotation vector alone, so alignment is only as good as the sensor —
+  typically a degree or two, which at ~15 px per degree is a visible softness in
+  the overlaps. `features2d` and `calib3d` are both in the artifact, so the
+  intended fix is to match features between overlapping frames and solve for a
+  small per-frame correction on top of the measured pose, with the sensor value
+  as the starting guess and the fallback when a pair does not match. This is what
+  `StitchStatus.AlignmentFailed` and `CameraEstimationFailed` are reserved for;
+  nothing currently produces them.
+- **Exposure compensation.** Frames shot into and away from the sun are blended
+  at their captured brightness, so a bright frame stays bright inside the
+  cross-fade. Equalising gain across the set before blending is the usual
+  remedy.
