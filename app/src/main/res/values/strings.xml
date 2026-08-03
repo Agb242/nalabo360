@@ -22,6 +22,12 @@
     <string name="capture_sphere_complete">Sphere complete</string>
     <string name="capture_restart">Start a new sphere</string>
     <string name="capture_finish_stitch">Finish &amp; stitch</string>
+    <string name="capture_instructions_title">Before you start</string>
+    <string name="capture_instructions_1">Stand in one spot and rotate your body in place — don\'t walk.</string>
+    <string name="capture_instructions_2">Hold the phone steady and level, turning it around a fixed point as you pan.</string>
+    <string name="capture_instructions_3">The shutter fires on its own — pause a moment on each marker.</string>
+    <string name="capture_instructions_4">Avoid blank walls and bright skies, and move slowly.</string>
+    <string name="capture_instructions_dismiss">Got it</string>
 
     <!-- Stitching. -->
     <string name="stitch_title">Building your sphere</string>

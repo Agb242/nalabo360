@@ -10,6 +10,7 @@ import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.pow
 import kotlin.math.sin
 
 /**
@@ -53,6 +54,16 @@ internal object EquirectangularRenderer {
 
     /** Rows accumulated at once. Sets the renderer's peak memory, with the width. */
     private const val BAND_HEIGHT = 128
+
+    /**
+     * Exponent the feather weight is raised to.
+     *
+     * A power greater than one makes the closest frame dominate a shared pixel
+     * and confines the cross-fade to a thin band. A linear feather leaves both
+     * frames at comparable weights across a wide overlap, which turns the
+     * residual pose error between neighbouring frames into a broad smear.
+     */
+    private const val BLEND_POWER = 3.0
 
     /**
      * Added to the weight before dividing, so an uncovered pixel divides 0 by a
@@ -246,10 +257,12 @@ internal object EquirectangularRenderer {
                 mapX[index] = sourceColumn.toFloat()
                 mapY[index] = sourceRow.toFloat()
                 // Feather: full strength at the optical axis, falling to nothing
-                // at the frame's border, so overlaps cross-fade.
+                // at the frame's border, so overlaps cross-fade. Raised to a
+                // power so the frame that sees the direction most head-on wins
+                // the blend instead of a wide linear cross-fade.
                 val acrossFrame = 1.0 - abs(sourceColumn - centreX) / centreX
                 val downFrame = 1.0 - abs(sourceRow - centreY) / centreY
-                val weight = acrossFrame * downFrame
+                val weight = (acrossFrame * downFrame).pow(BLEND_POWER)
                 if (weight > 0.0) {
                     weights[index] = weight.toFloat()
                     anyCovered = true

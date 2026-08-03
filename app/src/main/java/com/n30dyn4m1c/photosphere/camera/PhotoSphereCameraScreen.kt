@@ -30,18 +30,21 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -112,6 +115,16 @@ fun PhotoSphereCameraScreen(
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
 
+    // Guided capture can take minutes of pointing the phone around the scene;
+    // the system screen timeout must not cut in partway through.
+    val rootView = LocalView.current
+    DisposableEffect(rootView) {
+        rootView.keepScreenOn = true
+        onDispose {
+            rootView.keepScreenOn = false
+        }
+    }
+
     val tracker = rememberOrientationTracker()
     // Held as a State rather than read with `by`: touching `.value` here would
     // recompose the whole screen at the sensor's rate. Only the overlay's draw
@@ -137,6 +150,10 @@ fun PhotoSphereCameraScreen(
     var activeIndex by remember { mutableIntStateOf(0) }
     var isHolding by remember { mutableStateOf(false) }
     var accuracy by remember { mutableStateOf(OrientationAccuracy.Unknown) }
+
+    // A one-time reminder of how to stand, shown before the first frame falls
+    // so the capture that follows is built on a steady pivot.
+    var showInstructions by rememberSaveable { mutableStateOf(true) }
 
     // The stitch runs off the main thread and reports back from there, so its
     // progress travels as a StateFlow rather than as Compose state written from
@@ -221,8 +238,10 @@ fun PhotoSphereCameraScreen(
             }
 
             val currentPlan = plan
-                ?: SphereTargetPlan.create(startYawDegrees = orientation.yawDegrees)
-                    .also { plan = it }
+                ?: SphereTargetPlan.createForFieldOfView(
+                    startYawDegrees = orientation.yawDegrees,
+                    fieldOfView = fieldOfView,
+                ).also { plan = it }
 
             val target = currentPlan.getOrNull(activeIndex)
             if (target == null) {
@@ -389,6 +408,15 @@ fun PhotoSphereCameraScreen(
                 fieldOfView = fieldOfView,
             )
 
+            if (showInstructions && activeIndex == 0 && bufferedFrames.isEmpty()) {
+                CaptureInstructions(
+                    onDismiss = { showInstructions = false },
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .padding(horizontal = 28.dp),
+                )
+            }
+
             CaptureHud(
                 capturedCount = activeIndex.coerceAtMost(totalTargets),
                 totalTargets = totalTargets,
@@ -486,6 +514,54 @@ private fun CaptureHud(
                 Button(onClick = onRestart) {
                     Text(stringResource(R.string.capture_restart))
                 }
+            }
+        }
+    }
+}
+
+/**
+ * The one-shot reminder shown before the first frame.
+ *
+ * A floating card rather than a modal dialog: it sits over the viewfinder
+ * without taking focus or pausing the camera, and a single tap dismisses it for
+ * the session. A sphere is only as steady as the pivot it was shot on, so the
+ * points are about stance and stillness, not about the controls.
+ */
+@Composable
+private fun CaptureInstructions(
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(20.dp),
+        color = Color.Black.copy(alpha = 0.82f),
+        tonalElevation = 6.dp,
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = 16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text(
+                text = stringResource(R.string.capture_instructions_title),
+                style = MaterialTheme.typography.titleMedium,
+                color = Color.White,
+            )
+            listOf(
+                R.string.capture_instructions_1,
+                R.string.capture_instructions_2,
+                R.string.capture_instructions_3,
+                R.string.capture_instructions_4,
+            ).forEach { instruction ->
+                Text(
+                    text = stringResource(instruction),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = Color.White.copy(alpha = 0.88f),
+                )
+            }
+            TextButton(onClick = onDismiss) {
+                Text(stringResource(R.string.capture_instructions_dismiss))
             }
         }
     }

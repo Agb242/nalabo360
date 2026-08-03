@@ -69,6 +69,16 @@ data class SphereTargetPlan(val targets: List<SphereTarget>) {
         const val DEFAULT_EQUATOR_SPACING_DEGREES: Float = 30f
 
         /**
+         * How much of each frame its neighbours may re-shoot, as a fraction of
+         * the horizontal field of view.
+         *
+         * This stitcher works from measured poses rather than feature matches,
+         * so overlap only has to absorb capture error — a small overlap keeps
+         * the sphere covered without doubling every object up in a soft blend.
+         */
+        const val DEFAULT_TARGET_OVERLAP_FRACTION: Float = 0.25f
+
+        /**
          * Lays out a sphere whose first target sits at [startYawDegrees].
          *
          * Anchoring on the bearing the user is already facing means capture
@@ -79,6 +89,38 @@ data class SphereTargetPlan(val targets: List<SphereTarget>) {
             startYawDegrees: Float = 0f,
             ringElevations: List<Float> = DEFAULT_RING_ELEVATIONS,
             equatorSpacingDegrees: Float = DEFAULT_EQUATOR_SPACING_DEGREES,
+        ): SphereTargetPlan {
+            require(equatorSpacingDegrees > 0f) { "spacing must be positive" }
+
+            return createUnchecked(startYawDegrees, ringElevations, equatorSpacingDegrees)
+        }
+
+        /**
+         * Lays out a sphere whose frame spacing matches the device's optics.
+         *
+         * The yaw gap is the horizontal field of view minus the target overlap,
+         * so a wide-angle phone takes fewer, larger frames and a narrow one
+         * takes more, smaller frames — every frame covers roughly the same
+         * slice of the sphere instead of the fixed 30° spacing piling up far
+         * more overlap on wide lenses.
+         */
+        fun createForFieldOfView(
+            startYawDegrees: Float,
+            fieldOfView: FieldOfView,
+            ringElevations: List<Float> = DEFAULT_RING_ELEVATIONS,
+            targetOverlapFraction: Float = DEFAULT_TARGET_OVERLAP_FRACTION,
+        ): SphereTargetPlan {
+            require(targetOverlapFraction in 0f..1f) {
+                "overlap fraction must be between 0 and 1, was $targetOverlapFraction"
+            }
+            val spacing = fieldOfView.horizontalDegrees * (1f - targetOverlapFraction)
+            return createUnchecked(startYawDegrees, ringElevations, spacing)
+        }
+
+        private fun createUnchecked(
+            startYawDegrees: Float,
+            ringElevations: List<Float>,
+            equatorSpacingDegrees: Float,
         ): SphereTargetPlan {
             require(equatorSpacingDegrees > 0f) { "spacing must be positive" }
 

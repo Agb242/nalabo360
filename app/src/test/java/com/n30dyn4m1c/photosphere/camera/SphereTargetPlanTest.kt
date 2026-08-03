@@ -89,6 +89,31 @@ class SphereTargetPlanTest {
     }
 
     @Test
+    fun `field of view scaling keeps overlap roughly constant across lenses`() {
+        val narrow = SphereTargetPlan.createForFieldOfView(
+            startYawDegrees = 0f,
+            fieldOfView = FieldOfView(horizontalDegrees = 52f, verticalDegrees = 66f),
+        )
+        val wide = SphereTargetPlan.createForFieldOfView(
+            startYawDegrees = 0f,
+            fieldOfView = FieldOfView(horizontalDegrees = 76f, verticalDegrees = 66f),
+        )
+
+        // A wider lens needs fewer, larger frames per ring.
+        assertTrue("wide lens took more frames", wide.size < narrow.size)
+
+        // The equator spacing tracks the lens, so the overlap each frame has
+        // with its neighbour stays near the 25% target rather than piling up.
+        val overlap = { plan: SphereTargetPlan, horizontalFov: Float ->
+            val equator = plan.targets.filter { it.elevationDegrees == 0f }
+            val separation = angularDistance(equator[0], equator[1])
+            1f - separation / horizontalFov
+        }
+        assertTrue("narrow-lens overlap off target", overlap(narrow, 52f) in 0.1f..0.4f)
+        assertTrue("wide-lens overlap off target", overlap(wide, 76f) in 0.1f..0.4f)
+    }
+
+    @Test
     fun `a plan can be laid out with custom rings`() {
         val plan = SphereTargetPlan.create(
             ringElevations = listOf(0f),

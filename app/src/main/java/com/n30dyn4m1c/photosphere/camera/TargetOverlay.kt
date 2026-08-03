@@ -111,6 +111,7 @@ fun TargetOverlay(
             activeIndex = activeIndex,
             orientation = currentOrientation,
             focalPx = focalPx,
+            fieldOfView = fieldOfView,
             colors = colors,
             focus = focus.value,
             pulse = pulse.value,
@@ -126,12 +127,22 @@ fun TargetOverlay(
     }
 }
 
-/** Draws every marker: the ones already shot, the ones still to come, and the live one. */
+/**
+ * Draws every marker: the ones already shot, the ones still to come, and the live one.
+ *
+ * Each marker is a rectangle the size of one frame's capture footprint, not a
+ * dot: a filled one means "this area is already covered", an outlined one is
+ * "this is the next space to cover". Because the rectangles show the full
+ * sensor field of view they can reach past the edge of the preview — the
+ * preview is a crop of the capture, and the overlap between neighbouring
+ * rectangles is exactly the overlap between neighbouring shots.
+ */
 private fun DrawScope.drawTargets(
     targets: List<SphereTarget>,
     activeIndex: Int,
     orientation: OrientationData,
     focalPx: Float,
+    fieldOfView: FieldOfView,
     colors: TargetOverlayColors,
     focus: Float,
     pulse: Float,
@@ -139,8 +150,6 @@ private fun DrawScope.drawTargets(
     if (targets.isEmpty()) return
 
     val margin = EDGE_MARGIN.toPx()
-    val completedRadius = 5.dp.toPx()
-    val pendingRadius = 4.dp.toPx()
 
     targets.forEachIndexed { index, target ->
         if (index == activeIndex) return@forEachIndexed
@@ -150,28 +159,37 @@ private fun DrawScope.drawTargets(
         if (!position.isInside(size, margin)) return@forEachIndexed
 
         if (index < activeIndex) {
-            drawCircle(color = colors.completed, radius = completedRadius, center = position)
-            drawCircle(
-                color = colors.completed.copy(alpha = 0.35f),
-                radius = completedRadius * 2f,
-                center = position,
-                style = Stroke(width = 1.5.dp.toPx()),
+            drawFrameRect(
+                target = target,
+                orientation = orientation,
+                focalPx = focalPx,
+                fieldOfView = fieldOfView,
+                focus = 1f,
+                color = colors.completed,
+                fillAlpha = 0.14f,
+                strokeWidth = 1.5.dp.toPx(),
             )
         } else {
-            drawCircle(
+            drawFrameRect(
+                target = target,
+                orientation = orientation,
+                focalPx = focalPx,
+                fieldOfView = fieldOfView,
+                focus = 1f,
                 color = colors.pending,
-                radius = pendingRadius,
-                center = position,
-                style = Stroke(width = 1.5.dp.toPx()),
+                fillAlpha = 0f,
+                strokeWidth = 1.5.dp.toPx(),
             )
         }
     }
 
     val activeTarget = targets.getOrNull(activeIndex) ?: return
     drawActiveTarget(
-        view = SphereProjection.project(orientation, activeTarget),
+        target = activeTarget,
+        orientation = orientation,
         colors = colors,
         focalPx = focalPx,
+        fieldOfView = fieldOfView,
         focus = focus,
         pulse = pulse,
     )
@@ -180,20 +198,24 @@ private fun DrawScope.drawTargets(
 /**
  * Draws the target the user is being sent to.
  *
- * On screen it is a ring with an expanding pulse and a guide line back to the
- * reticle; off screen — behind the camera, or past the edge of the preview — it
- * collapses to a chevron on the border pointing the way to turn. Without that
- * fallback the first frame of a new ring would simply leave the user with an
- * empty viewfinder and no idea which way to go.
+ * On screen it is a pulsing rectangle the size of the frame that shot will
+ * capture, with a guide line back to the reticle; off screen — behind the
+ * camera, or past the edge of the preview — it collapses to a chevron on the
+ * border pointing the way to turn. Without that fallback the first frame of a
+ * new target would simply leave the user with an empty viewfinder and no idea
+ * which way to go.
  */
 private fun DrawScope.drawActiveTarget(
-    view: TargetView,
+    target: SphereTarget,
+    orientation: OrientationData,
     colors: TargetOverlayColors,
     focalPx: Float,
+    fieldOfView: FieldOfView,
     focus: Float,
     pulse: Float,
 ) {
     val margin = EDGE_MARGIN.toPx()
+    val view = SphereProjection.project(orientation, target)
     val position = view.screenOffset(center, focalPx)
 
     if (position == null || !position.isInside(size, margin)) {
@@ -205,13 +227,12 @@ private fun DrawScope.drawActiveTarget(
         return
     }
 
-    val radius = 16.dp.toPx() * (0.7f + 0.3f * focus)
     val strokeWidth = 2.5.dp.toPx()
 
     // A dashed line from the reticle to the marker: at a glance it reads as
     // "move this way", and it disappears once the two are on top of each other.
     val separation = (position - center).getDistance()
-    if (separation > radius * 2f) {
+    if (separation > 32.dp.toPx()) {
         drawLine(
             color = colors.guide.copy(alpha = colors.guide.alpha * focus),
             start = center,
@@ -223,22 +244,90 @@ private fun DrawScope.drawActiveTarget(
         )
     }
 
-    drawCircle(
-        color = colors.active.copy(alpha = (1f - pulse) * 0.5f * focus),
-        radius = radius * (1f + pulse),
-        center = position,
-        style = Stroke(width = strokeWidth),
+    // Two passes: a soft glowing fill that breathes with the pulse, then the
+    // crisp border that carries the colour.
+    drawFrameRect(
+        target = target,
+        orientation = orientation,
+        focalPx = focalPx,
+        fieldOfView = fieldOfView,
+        focus = focus,
+        color = colors.active.copy(alpha = (1f - pulse) * 0.25f * focus),
+        fillAlpha = 0.10f,
+        strokeWidth = strokeWidth,
     )
-    drawCircle(
+    drawFrameRect(
+        target = target,
+        orientation = orientation,
+        focalPx = focalPx,
+        fieldOfView = fieldOfView,
+        focus = focus,
         color = colors.active.copy(alpha = focus),
-        radius = radius,
-        center = position,
-        style = Stroke(width = strokeWidth),
+        fillAlpha = 0f,
+        strokeWidth = strokeWidth,
     )
     drawCircle(
         color = colors.active.copy(alpha = focus),
         radius = 3.dp.toPx(),
         center = position,
+    )
+}
+
+/**
+ * Draws the rectangle of sky one frame shot at [target] will cover.
+ *
+ * The corners are the four directions a camera aimed at [target] sees at the
+ * edges of its field of view; projecting them to the screen gives the capture
+ * footprint. Drawn only when all four project in front of the camera — close to
+ * the edge of the preview some fall behind it, and a clipped quadrilateral
+ * would mislead more than a missing marker.
+ */
+private fun DrawScope.drawFrameRect(
+    target: SphereTarget,
+    orientation: OrientationData,
+    focalPx: Float,
+    fieldOfView: FieldOfView,
+    focus: Float,
+    color: Color,
+    fillAlpha: Float,
+    strokeWidth: Float,
+) {
+    val projected = frameCorners(target, fieldOfView).mapNotNull { corner ->
+        SphereProjection.project(orientation, corner).screenOffset(center, focalPx)
+    }
+    if (projected.size < 4) return
+
+    // Grow in from the centre on a hand-over rather than appearing in place.
+    val scaled = projected.map { point ->
+        if (focus >= 1f) point else center + (point - center) * focus
+    }
+
+    val path = Path().apply {
+        moveTo(scaled[0].x, scaled[0].y)
+        lineTo(scaled[1].x, scaled[1].y)
+        lineTo(scaled[3].x, scaled[3].y)
+        lineTo(scaled[2].x, scaled[2].y)
+        close()
+    }
+    if (fillAlpha > 0f) drawPath(path, color = color.copy(alpha = fillAlpha))
+    drawPath(path, color = color, style = Stroke(width = strokeWidth))
+}
+
+/**
+ * The four directions that bound a frame shot at [target]: its field of view
+ * swung out by half the horizontal angle to either side and half the vertical
+ * angle above and below. An approximation near the poles, exact enough for a
+ * guide the capture threshold is measured against in degrees.
+ */
+private fun frameCorners(target: SphereTarget, fieldOfView: FieldOfView): List<SphereTarget> {
+    val halfWidth = fieldOfView.horizontalDegrees / 2f
+    val halfHeight = fieldOfView.verticalDegrees / 2f
+    val elevation = target.elevationDegrees
+    return listOf(
+        SphereTarget.atElevation(target.yawDegrees - halfWidth, elevation + halfHeight),
+        SphereTarget.atElevation(target.yawDegrees + halfWidth, elevation + halfHeight),
+        SphereTarget.atElevation(target.yawDegrees - halfWidth, elevation - halfHeight),
+        SphereTarget.atElevation(target.yawDegrees + halfWidth, elevation - halfHeight),
     )
 }
 
