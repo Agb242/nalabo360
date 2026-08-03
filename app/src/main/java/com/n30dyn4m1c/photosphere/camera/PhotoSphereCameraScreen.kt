@@ -56,7 +56,9 @@ import com.n30dyn4m1c.photosphere.sensor.OrientationAccuracy
 import com.n30dyn4m1c.photosphere.sensor.OrientationData
 import com.n30dyn4m1c.photosphere.sensor.currentDisplayRotation
 import com.n30dyn4m1c.photosphere.sensor.rememberOrientationTracker
+import com.n30dyn4m1c.photosphere.stitching.CameraPose
 import com.n30dyn4m1c.photosphere.stitching.PhotoSphereStitcher
+import com.n30dyn4m1c.photosphere.stitching.SphereFrame
 import com.n30dyn4m1c.photosphere.stitching.StitchException
 import com.n30dyn4m1c.photosphere.stitching.StitchProgress
 import com.n30dyn4m1c.photosphere.stitching.StitchStage
@@ -291,12 +293,27 @@ fun PhotoSphereCameraScreen(
      */
     fun startStitch() {
         if (stitchJob != null) return
-        val frames = buffer.files()
+        // The stitcher works from where each frame was shot, not just its
+        // pixels: the capture attitude is what places it on the sphere.
+        val frames = buffer.frames.value.map { frame ->
+            SphereFrame(
+                file = frame.file,
+                pose = CameraPose(
+                    yawDegrees = frame.yawDegrees,
+                    pitchDegrees = frame.pitchDegrees,
+                    rollDegrees = frame.rollDegrees,
+                ),
+            )
+        }
         stitchProgress.value = StitchProgress.Preparing
 
         val job = scope.launch(start = CoroutineStart.LAZY) {
             try {
-                PhotoSphereStitcher.stitchPhotos(frames) { stitchProgress.value = it }
+                PhotoSphereStitcher.stitchPhotos(
+                    frames = frames,
+                    horizontalFovDegrees = fieldOfView.horizontalDegrees,
+                    verticalFovDegrees = fieldOfView.verticalDegrees,
+                ) { stitchProgress.value = it }
                     .onSuccess { sphere ->
                         val stitched = try {
                             withContext(Dispatchers.IO) {

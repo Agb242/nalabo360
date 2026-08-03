@@ -8,50 +8,45 @@ import androidx.exifinterface.media.ExifInterface
 import com.n30dyn4m1c.photosphere.PhotoSphereApplication
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import org.opencv.android.OpenCVLoader
 import org.opencv.android.Utils
-import org.opencv.core.Core
-import org.opencv.core.CvType
 import org.opencv.core.Mat
-import org.opencv.core.Rect
-import org.opencv.core.Scalar
-import org.opencv.core.Size
 import org.opencv.imgproc.Imgproc
-import org.opencv.stitching.Stitcher
 import java.io.File
+import kotlin.math.roundToInt
 
 private const val TAG = "PhotoSphereStitcher"
 
 /**
  * Why a stitch ended the way it did.
  *
- * The first four map straight onto OpenCV's own return codes so a caller can log
- * something a bug report can be searched for; the rest are this pipeline's own,
- * numbered clear of OpenCV's range.
+ * The codes are this pipeline's contract with its own logs and bug reports, not
+ * anyone else's: 0–3 are the outcomes a registration pass can have, and
+ * everything from 100 up is a failure of the machinery around it.
  */
 enum class StitchStatus(val code: Int) {
     /** A panorama came back. */
-    Ok(Stitcher.OK),
+    Ok(0),
 
     /**
-     * Too few frames overlapped enough to be joined. Usually a run that stopped
-     * early, or a pan that skipped a chunk of the sphere.
+     * Too little of the sphere was covered to be worth calling a photo sphere.
+     * Usually a run that stopped early, or a pan that skipped a chunk.
      */
-    NeedMoreImages(Stitcher.ERR_NEED_MORE_IMAGES),
+    NeedMoreImages(1),
 
     /**
-     * OpenCV could not work out how the frames relate to each other. The classic
-     * cause is the camera *translating* between frames — walking, or pivoting
-     * around the body rather than the lens — which breaks the pure-rotation
-     * assumption a panorama stitch is built on. A near-featureless scene (blank
-     * sky, plain wall) does it too.
+     * The frames could not be reconciled into one view. The classic cause is the
+     * camera *translating* between frames — walking, or pivoting around the body
+     * rather than the lens — which breaks the pure-rotation assumption a
+     * panorama is built on.
      */
-    AlignmentFailed(Stitcher.ERR_HOMOGRAPHY_EST_FAIL),
+    AlignmentFailed(2),
 
-    /** Frames aligned pairwise but no consistent camera could explain them all. */
-    CameraEstimationFailed(Stitcher.ERR_CAMERA_PARAMS_ADJUST_FAIL),
+    /** No consistent camera could explain the frames that were handed in. */
+    CameraEstimationFailed(3),
 
     /** The native library never loaded, so there is no stitcher to run. */
     OpenCvUnavailable(100),
@@ -62,7 +57,7 @@ enum class StitchStatus(val code: Int) {
     /** A buffered frame could not be decoded — deleted, or truncated mid-write. */
     UnreadableInput(102),
 
-    /** OpenCV reported success but produced nothing. */
+    /** The render completed but reached none of the sphere. */
     EmptyResult(103),
 
     /** Ran out of memory holding the frames or the panorama. */
@@ -70,18 +65,6 @@ enum class StitchStatus(val code: Int) {
 
     /** Anything else, including native exceptions from inside OpenCV. */
     Unknown(199),
-    ;
-
-    companion object {
-        /** Maps an `ERR_*` value returned by [Stitcher.stitch]. */
-        fun fromOpenCvCode(code: Int): StitchStatus = when (code) {
-            Stitcher.OK -> Ok
-            Stitcher.ERR_NEED_MORE_IMAGES -> NeedMoreImages
-            Stitcher.ERR_HOMOGRAPHY_EST_FAIL -> AlignmentFailed
-            Stitcher.ERR_CAMERA_PARAMS_ADJUST_FAIL -> CameraEstimationFailed
-            else -> Unknown
-        }
-    }
 }
 
 /** A stitch that did not produce a panorama, carrying the [status] that says why. */
@@ -99,20 +82,20 @@ enum class StitchStage {
     /** Decoding buffered frames into matrices. */
     Reading,
 
-    /** Inside OpenCV: registration, camera estimation, warping, blending. */
+    /** Projecting frames onto the sphere and blending the overlaps. */
     Stitching,
 
-    /** Cropping and placing the panorama in its equirectangular canvas. */
+    /** Turning the finished canvas into a bitmap. */
     Projecting,
 }
 
 /**
  * How far along a stitch is.
  *
- * Only [StitchStage.Reading] can report real progress — everything inside
- * OpenCV's `stitch` call is one opaque block — so [fraction] is null for the
- * other stages and the UI shows an indeterminate spinner there rather than a
- * bar that lies.
+ * [StitchStage.Reading] and [StitchStage.Stitching] both report real progress —
+ * one frame and one band of canvas at a time. The short stages either side leave
+ * [fraction] null, and the UI shows an indeterminate spinner for those rather
+ * than a bar that lies.
  */
 data class StitchProgress(
     val stage: StitchStage,
@@ -128,32 +111,52 @@ data class StitchProgress(
 }
 
 /**
+ * One frame on its way into a sphere: the pixels, and where the camera was.
+ *
+ * The pose is what makes this pipeline possible at all — see the class docs on
+ * [PhotoSphereStitcher].
+ */
+data class SphereFrame(
+    val file: File,
+    val pose: CameraPose,
+)
+
+/**
  * Turns a session's frames into one equirectangular sphere.
  *
- * The work is OpenCV's `Stitcher` in [Stitcher.PANORAMA] mode: it finds features
- * in each frame, matches them, solves for the camera's rotation and focal
- * length, warps everything onto a sphere and blends the seams. That mode's
- * spherical warper is what makes the output equirectangular geometry rather than
- * a flat mosaic — [EquirectangularFit] only has to crop it and put it in a 2:1
- * frame.
+ * **Why this is not OpenCV's `Stitcher`.** It cannot be: the stitching module is
+ * absent from every prebuilt OpenCV for Android. `org.opencv:opencv` ships Java
+ * bindings for core, imgproc, features2d, calib3d and the rest, but there is no
+ * `org.opencv.stitching` package and `libopencv_java4.so` contains none of the
+ * pipeline's symbols either. `cv::Stitcher` is, in practice, a desktop API.
  *
- * Everything runs on [Dispatchers.Default]: it is compute-bound, and OpenCV
- * blocks the calling thread for the whole registration pass. Failures come back
- * as a failed [Result] holding a [StitchException] — a stitch that cannot find
- * enough overlap is an ordinary outcome of a hurried capture, not a crash.
+ * **What replaces it.** Guided capture already knows where the camera was
+ * pointing for every frame, because the alignment gate only fires when the
+ * device is held on a known target. That turns the hard half of stitching —
+ * solving for each camera's rotation — into something already measured, and what
+ * is left is a reprojection: every pixel of the output canvas is a direction on
+ * the sphere, and for each frame that direction is rotated into the frame's axes
+ * and divided through by depth to find the pixel that saw it. Overlaps are
+ * resolved by a feathered weighted mean, so seams cross-fade.
  *
- * Memory is the real constraint. A full sphere is forty-odd frames, and OpenCV
- * holds them all plus their warped copies at once, so frames are decoded down to
- * [DEFAULT_MAX_INPUT_DIMENSION] on the long edge first. Raising that improves
- * detail and quadratically increases the chance of an out-of-memory failure on a
- * mid-range phone.
+ * The result is equirectangular by construction rather than by cropping
+ * something else into shape: a pixel's row *is* its latitude, so an incomplete
+ * sphere is black exactly where it was not shot, at the right elevation.
+ *
+ * The accuracy ceiling is the rotation vector sensor, which is fused and
+ * drift-free but not perfect; residual error shows up as soft doubling in the
+ * overlaps rather than as a broken panorama.
+ *
+ * Everything runs on [Dispatchers.Default] — it is compute-bound — and failures
+ * come back as a failed [Result] holding a [StitchException]. A sphere that was
+ * captured too sparsely is an ordinary outcome of a hurried run, not a crash.
  */
 object PhotoSphereStitcher {
 
     /** Below this a sphere is not worth attempting; also what the UI gates on. */
     const val MIN_FRAMES = 6
 
-    /** OpenCV itself cannot do anything with fewer than two views. */
+    /** One frame is a photo, not a panorama. */
     const val MIN_STITCHABLE_FRAMES = 2
 
     /** Long-edge limit each frame is decoded down to. */
@@ -162,17 +165,15 @@ object PhotoSphereStitcher {
     /** Width cap for the finished sphere; the canvas is always half as tall. */
     const val DEFAULT_MAX_OUTPUT_WIDTH = 4096
 
-    /**
-     * Confidence a frame needs to join the panorama.
-     *
-     * OpenCV defaults to 1.0. Guided capture aims for ~40% overlap on frames
-     * shot handheld, which lands a little under that on plain surfaces, so the
-     * bar is lowered enough to keep those frames rather than silently dropping
-     * them and reporting `ERR_NEED_MORE_IMAGES`.
-     */
-    private const val PANORAMA_CONFIDENCE_THRESHOLD = 0.7
+    /** Never render a canvas narrower than this, however coarse the input. */
+    private const val MIN_OUTPUT_WIDTH = 512
 
-    private const val ZERO_BYTE: Byte = 0
+    /**
+     * Fraction of the sphere that has to be covered for the result to be worth
+     * showing. A full plan reaches about two thirds of the canvas — everything
+     * between ±60° of elevation — so this only catches runs that barely started.
+     */
+    private const val MIN_COVERAGE = 0.02f
 
     @Volatile
     private var isOpenCvReady: Boolean = false
@@ -182,8 +183,7 @@ object PhotoSphereStitcher {
      *
      * [PhotoSphereApplication] does this at process start; this is the belt to
      * that braces, for a stitch running in a process where the Application class
-     * never ran (tests, or a content provider hosting the code). `initLocal` is
-     * idempotent, so calling it twice costs nothing.
+     * never ran. `initLocal` is idempotent, so calling it twice costs nothing.
      */
     @Synchronized
     fun ensureOpenCv(): Boolean {
@@ -194,25 +194,29 @@ object PhotoSphereStitcher {
     }
 
     /**
-     * Stitches [imageFiles] into a 2:1 equirectangular [Bitmap].
+     * Stitches [frames] into a 2:1 equirectangular [Bitmap].
+     *
+     * The two field of view angles describe the *decoded, upright* frame — the
+     * same screen-frame angles `rememberCameraFieldOfView` reports — and set how
+     * much sphere each frame is taken to cover. Getting them wrong scales the
+     * whole panorama: too narrow leaves gaps between frames, too wide overlaps
+     * them.
      *
      * [onProgress] is called from the stitching thread, not the main one — hand
      * the value to a `StateFlow` or post it rather than writing Compose state
      * from it directly.
      *
-     * Cancelling the calling coroutine takes effect at the stage boundaries: the
-     * native `stitch` call cannot be interrupted, so a cancellation raised while
-     * it is running is honoured as soon as it returns.
-     *
      * The returned bitmap is the caller's to recycle.
      */
     suspend fun stitchPhotos(
-        imageFiles: List<File>,
+        frames: List<SphereFrame>,
+        horizontalFovDegrees: Float,
+        verticalFovDegrees: Float,
         maxInputDimension: Int = DEFAULT_MAX_INPUT_DIMENSION,
         maxOutputWidth: Int = DEFAULT_MAX_OUTPUT_WIDTH,
         onProgress: (StitchProgress) -> Unit = {},
     ): Result<Bitmap> = withContext(Dispatchers.Default) {
-        val images = ArrayList<Mat>(imageFiles.size)
+        val prepared = ArrayList<PreparedFrame>(frames.size)
         try {
             onProgress(StitchProgress.Preparing)
 
@@ -222,40 +226,88 @@ object PhotoSphereStitcher {
                     "OpenCV is not loaded on this device",
                 )
             }
-            if (imageFiles.isEmpty()) {
+            if (frames.isEmpty()) {
                 throw StitchException(StitchStatus.NoInputImages, "No frames to stitch")
             }
-            if (imageFiles.size < MIN_STITCHABLE_FRAMES) {
+            if (frames.size < MIN_STITCHABLE_FRAMES) {
                 throw StitchException(
                     StitchStatus.NeedMoreImages,
-                    "Got ${imageFiles.size} frame(s), need at least $MIN_STITCHABLE_FRAMES",
+                    "Got ${frames.size} frame(s), need at least $MIN_STITCHABLE_FRAMES",
                 )
             }
 
-            imageFiles.forEachIndexed { position, file ->
+            // The canvas is sized to the detail the frames actually carry: a
+            // frame is worth `width / horizontal fov` pixels per degree, and 360°
+            // of that is as wide as the sphere can be without inventing pixels.
+            var canvasWidth = maxOutputWidth
+
+            frames.forEachIndexed { position, frame ->
                 ensureActive()
-                onProgress(StitchProgress(StitchStage.Reading, position, imageFiles.size))
-                images += readFrame(file, maxInputDimension)
+                onProgress(StitchProgress(StitchStage.Reading, position, frames.size))
+
+                val image = readFrame(frame.file, maxInputDimension)
+                val intrinsics = FrameIntrinsics.fromFieldOfView(
+                    widthPx = image.cols(),
+                    heightPx = image.rows(),
+                    horizontalFovDegrees = horizontalFovDegrees,
+                    verticalFovDegrees = verticalFovDegrees,
+                )
+                if (position == 0) {
+                    canvasWidth = canvasWidthFor(
+                        frameWidthPx = image.cols(),
+                        horizontalFovDegrees = horizontalFovDegrees,
+                        maxOutputWidth = maxOutputWidth,
+                    )
+                }
+                val basis = CameraBasis.of(frame.pose)
+                prepared += PreparedFrame(
+                    image = image,
+                    basis = basis,
+                    intrinsics = intrinsics,
+                    footprint = FrameFootprint.compute(
+                        basis = basis,
+                        intrinsics = intrinsics,
+                        canvasWidth = canvasWidth,
+                        canvasHeight = canvasWidth / 2,
+                    ),
+                )
             }
-            onProgress(StitchProgress(StitchStage.Reading, imageFiles.size, imageFiles.size))
+            onProgress(StitchProgress(StitchStage.Reading, frames.size, frames.size))
 
             ensureActive()
             onProgress(StitchProgress(StitchStage.Stitching))
-            val panorama = Mat()
+            // Captured rather than called inside the lambda: the renderer is not
+            // a suspending function, so the context has to be carried in.
+            val context = currentCoroutineContext()
+            val rendered = EquirectangularRenderer.render(
+                frames = prepared,
+                canvasWidth = canvasWidth,
+                canvasHeight = canvasWidth / 2,
+                onBandComplete = { completed, total ->
+                    onProgress(StitchProgress(StitchStage.Stitching, completed, total))
+                },
+                checkCancelled = { context.ensureActive() },
+            )
+
             try {
-                val status = StitchStatus.fromOpenCvCode(newStitcher().stitch(images, panorama))
-                if (status != StitchStatus.Ok) {
-                    throw StitchException(status, "OpenCV stitch failed with ${status.name}")
+                if (rendered.coverage <= 0f) {
+                    throw StitchException(
+                        StitchStatus.EmptyResult,
+                        "The render reached none of the sphere",
+                    )
                 }
-                if (panorama.empty()) {
-                    throw StitchException(StitchStatus.EmptyResult, "Stitch produced no pixels")
+                if (rendered.coverage < MIN_COVERAGE) {
+                    throw StitchException(
+                        StitchStatus.NeedMoreImages,
+                        "Only ${(rendered.coverage * 100).roundToInt()}% of the sphere was covered",
+                    )
                 }
 
                 ensureActive()
                 onProgress(StitchProgress(StitchStage.Projecting))
-                Result.success(toEquirectangularBitmap(panorama, maxOutputWidth))
+                Result.success(toBitmap(rendered.canvas))
             } finally {
-                panorama.release()
+                rendered.canvas.release()
             }
         } catch (e: CancellationException) {
             throw e
@@ -265,7 +317,7 @@ object PhotoSphereStitcher {
         } catch (e: OutOfMemoryError) {
             // Recoverable here: the frames are released in the finally below, and
             // the user can retry at a lower input resolution.
-            Log.e(TAG, "Out of memory stitching ${imageFiles.size} frames", e)
+            Log.e(TAG, "Out of memory stitching ${frames.size} frames", e)
             Result.failure<Bitmap>(
                 StitchException(StitchStatus.OutOfMemory, "Not enough memory to stitch", e)
             )
@@ -276,26 +328,35 @@ object PhotoSphereStitcher {
                 StitchException(StitchStatus.Unknown, e.message ?: "Stitch failed", e)
             )
         } finally {
-            images.forEach(Mat::release)
+            prepared.forEach { it.image.release() }
         }
     }
 
-    /** A stitcher configured for handheld sphere capture. */
-    private fun newStitcher(): Stitcher = Stitcher.create(Stitcher.PANORAMA).apply {
-        setPanoConfidenceThresh(PANORAMA_CONFIDENCE_THRESHOLD)
-        // Straightens the horizon: without it the panorama drifts into a wave as
-        // small roll errors accumulate around the sphere.
-        setWaveCorrection(true)
+    /**
+     * Canvas width that matches the detail in the frames.
+     *
+     * Rendering wider than this only interpolates: the frames hold
+     * `frameWidthPx / fov` pixels per degree and the sphere is 360° around. The
+     * width is forced even so the 2:1 canvas has an integer height.
+     */
+    internal fun canvasWidthFor(
+        frameWidthPx: Int,
+        horizontalFovDegrees: Float,
+        maxOutputWidth: Int,
+    ): Int {
+        val ideal = (360.0 * frameWidthPx / horizontalFovDegrees).roundToInt()
+        val width = minOf(ideal, maxOutputWidth).coerceAtLeast(MIN_OUTPUT_WIDTH)
+        return width - (width % 2)
     }
 
     /**
-     * Decodes one frame into the 8-bit 3-channel matrix the stitcher expects.
+     * Decodes one frame into the 8-bit 3-channel matrix the renderer samples.
      *
      * Frames are decoded subsampled and rotated upright first. The rotation
      * matters more than it looks: CameraX records device rotation in EXIF rather
      * than rotating pixels, so a run that crossed a screen rotation would
-     * otherwise hand OpenCV a mix of portrait and landscape frames with no way
-     * to relate them.
+     * otherwise hand the renderer a mix of portrait and landscape frames while
+     * the field of view describes only one of them.
      */
     private fun readFrame(file: File, maxDimension: Int): Mat {
         val bitmap = decodeUpright(file, maxDimension)
@@ -317,6 +378,13 @@ object PhotoSphereStitcher {
             bitmap.recycle()
         }
         return rgb
+    }
+
+    /** Copies the finished canvas out into a bitmap the UI can show. */
+    private fun toBitmap(canvas: Mat): Bitmap {
+        val bitmap = Bitmap.createBitmap(canvas.cols(), canvas.rows(), Bitmap.Config.ARGB_8888)
+        Utils.matToBitmap(canvas, bitmap)
+        return bitmap
     }
 
     /** Decodes [file] no larger than [maxDimension], with EXIF rotation applied. */
@@ -368,111 +436,6 @@ object PhotoSphereStitcher {
         )
         if (rotated !== bitmap) bitmap.recycle()
         return rotated
-    }
-
-    /**
-     * Crops the panorama's black surround and centres it in a 2:1 canvas.
-     *
-     * The stitched matrix is the bounding box of everything that was warped onto
-     * the sphere, so it carries black wherever the capture did not reach. The
-     * crop takes the tight bounding box of the pixels that *are* covered — gaps
-     * inside it stay black, which is honest about what was shot — and
-     * [EquirectangularFit] decides where that band sits in the equirectangular
-     * frame.
-     */
-    private fun toEquirectangularBitmap(panorama: Mat, maxOutputWidth: Int): Bitmap {
-        val bounds = contentBounds(panorama)
-        val cropped = if (bounds.width == panorama.cols() && bounds.height == panorama.rows()) {
-            panorama
-        } else {
-            panorama.submat(bounds)
-        }
-
-        val placement = EquirectangularFit.place(
-            sourceWidth = cropped.cols(),
-            sourceHeight = cropped.rows(),
-            maxCanvasWidth = maxOutputWidth,
-        )
-
-        // The canvas takes the panorama's own type so the resize below writes
-        // through the submat instead of quietly reallocating it.
-        val canvas = Mat.zeros(placement.canvasHeight, placement.canvasWidth, cropped.type())
-        try {
-            val target = Rect(placement.left, placement.top, placement.width, placement.height)
-            val region = canvas.submat(target)
-            try {
-                // Sizes and type already match, so this writes through the
-                // submat into the canvas rather than reallocating.
-                Imgproc.resize(
-                    cropped,
-                    region,
-                    Size(placement.width.toDouble(), placement.height.toDouble()),
-                    0.0,
-                    0.0,
-                    Imgproc.INTER_AREA,
-                )
-            } finally {
-                region.release()
-            }
-
-            val bitmap = Bitmap.createBitmap(
-                placement.canvasWidth,
-                placement.canvasHeight,
-                Bitmap.Config.ARGB_8888,
-            )
-            Utils.matToBitmap(canvas, bitmap)
-            return bitmap
-        } finally {
-            canvas.release()
-            if (cropped !== panorama) cropped.release()
-        }
-    }
-
-    /**
-     * Tight bounding box of the non-black pixels of [image].
-     *
-     * Found by collapsing the mask to one row and one column with a max
-     * reduction, which costs two passes and a few kilobytes — `findNonZero` on a
-     * panorama would allocate a point per lit pixel, tens of megabytes for the
-     * same answer.
-     */
-    private fun contentBounds(image: Mat): Rect {
-        val gray = Mat()
-        val mask = Mat()
-        val columns = Mat()
-        val rows = Mat()
-        try {
-            when (image.channels()) {
-                1 -> image.copyTo(gray)
-                4 -> Imgproc.cvtColor(image, gray, Imgproc.COLOR_RGBA2GRAY)
-                else -> Imgproc.cvtColor(image, gray, Imgproc.COLOR_RGB2GRAY)
-            }
-            Core.compare(gray, Scalar(0.0), mask, Core.CMP_GT)
-            Core.reduce(mask, columns, /* dim = */ 0, Core.REDUCE_MAX, CvType.CV_8U)
-            Core.reduce(mask, rows, /* dim = */ 1, Core.REDUCE_MAX, CvType.CV_8U)
-
-            val columnData = ByteArray(columns.cols())
-            columns.get(0, 0, columnData)
-            val rowData = ByteArray(rows.rows())
-            rows.get(0, 0, rowData)
-
-            val left = columnData.indexOfFirst { it != ZERO_BYTE }
-            val right = columnData.indexOfLast { it != ZERO_BYTE }
-            val top = rowData.indexOfFirst { it != ZERO_BYTE }
-            val bottom = rowData.indexOfLast { it != ZERO_BYTE }
-
-            // An all-black panorama has no content to crop to; hand back the
-            // whole thing and let the caller ship a black sphere rather than a
-            // zero-sized crash.
-            if (left < 0 || top < 0) return Rect(0, 0, image.cols(), image.rows())
-
-            return Rect(left, top, right - left + 1, bottom - top + 1)
-        } finally {
-            gray.release()
-            mask.release()
-            columns.release()
-            rows.release()
-        }
     }
 }
 

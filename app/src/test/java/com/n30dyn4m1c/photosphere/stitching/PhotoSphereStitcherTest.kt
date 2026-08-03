@@ -11,37 +11,55 @@ import org.junit.Test
 class PhotoSphereStitcherTest {
 
     @Test
-    fun `OpenCV return codes map to statuses a user can be told about`() {
-        assertEquals(StitchStatus.Ok, StitchStatus.fromOpenCvCode(0))
-        assertEquals(StitchStatus.NeedMoreImages, StitchStatus.fromOpenCvCode(1))
-        assertEquals(StitchStatus.AlignmentFailed, StitchStatus.fromOpenCvCode(2))
-        assertEquals(StitchStatus.CameraEstimationFailed, StitchStatus.fromOpenCvCode(3))
-    }
-
-    @Test
-    fun `an unrecognised return code does not go unreported`() {
-        assertEquals(StitchStatus.Unknown, StitchStatus.fromOpenCvCode(42))
-        assertEquals(StitchStatus.Unknown, StitchStatus.fromOpenCvCode(-1))
-    }
-
-    @Test
-    fun `this pipeline's own statuses cannot collide with OpenCV's`() {
-        val openCvCodes = setOf(
+    fun `registration outcomes and machinery failures stay in separate ranges`() {
+        val registrationOutcomes = setOf(
             StitchStatus.Ok,
             StitchStatus.NeedMoreImages,
             StitchStatus.AlignmentFailed,
             StitchStatus.CameraEstimationFailed,
-        ).map(StitchStatus::code)
+        )
 
+        registrationOutcomes.forEach {
+            assertTrue("${it.name} should be a low code", it.code in 0..3)
+        }
         StitchStatus.entries
-            .filterNot { it.code in openCvCodes }
-            .forEach { assertTrue("${it.name} sits in OpenCV's range", it.code >= 100) }
+            .filterNot { it in registrationOutcomes }
+            .forEach { assertTrue("${it.name} should sit clear of the low range", it.code >= 100) }
+    }
 
+    @Test
+    fun `every status carries its own code`() {
         assertEquals(
-            "every status needs its own code",
+            "codes are what a bug report is searched by, so they cannot collide",
             StitchStatus.entries.size,
             StitchStatus.entries.map(StitchStatus::code).toSet().size,
         )
+    }
+
+    @Test
+    fun `the canvas is never rendered wider than the frames justify`() {
+        // A 1024px frame across 66° carries ~15.5 px per degree, so a full turn
+        // is worth ~5585px — under the cap, which therefore does not bite.
+        assertEquals(
+            5584,
+            PhotoSphereStitcher.canvasWidthFor(1024, 66f, maxOutputWidth = 8192),
+        )
+        // The same frames under a 4096 cap take the cap instead.
+        assertEquals(
+            4096,
+            PhotoSphereStitcher.canvasWidthFor(1024, 66f, maxOutputWidth = 4096),
+        )
+    }
+
+    @Test
+    fun `the canvas width is always even so the 2 to 1 canvas has whole rows`() {
+        listOf(320, 512, 1024, 1600, 4000).forEach { frameWidth ->
+            listOf(37f, 66f, 90f, 121f).forEach { fov ->
+                val width = PhotoSphereStitcher.canvasWidthFor(frameWidth, fov, 4096)
+                assertEquals("width $width is odd for $frameWidth px at $fov°", 0, width % 2)
+                assertTrue("width $width is unusably small", width >= 512)
+            }
+        }
     }
 
     @Test
