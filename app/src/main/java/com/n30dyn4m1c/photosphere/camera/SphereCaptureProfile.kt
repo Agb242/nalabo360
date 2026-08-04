@@ -1,9 +1,14 @@
+@file:OptIn(androidx.camera.camera2.interop.ExperimentalCamera2Interop::class)
+@file:SuppressLint("UnsafeOptInUsageError")
+
 package com.n30dyn4m1c.photosphere.camera
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
+import android.os.Build
 import androidx.camera.camera2.interop.Camera2Interop
 
 /**
@@ -34,24 +39,10 @@ import androidx.camera.camera2.interop.Camera2Interop
  */
 data class SphereCaptureProfile(
     val focusMode: FocusMode,
-    val burstPerTarget: Int,
     val aeLockSupported: Boolean,
     val awbLockSupported: Boolean,
     val opticalStabilizationSupported: Boolean,
-) {
-    companion object {
-        /**
-         * How many frames each target is burst with before the sharpest is kept.
-         *
-         * The burst is shot at identical, locked settings, so it is not an HDR
-         * bracket — it is handheld-tremor insurance: at the long shutter speeds
-         * AE lock leaves in low light, one of two frames is usually noticeably
-         * sharper, and the stitcher never sees the other. Two keeps the per-target
-         * cost close to a single capture on the S23's write speed.
-         */
-        const val DEFAULT_BURST_PER_TARGET: Int = 2
-    }
-}
+)
 
 /**
  * What focus does across a session.
@@ -107,15 +98,18 @@ internal fun resolveOpticalStabilization(stabilizationModes: IntArray?): Boolean
  * most conservative profile (locks everything, locks focus on the first frame)
  * rather than failing capture.
  */
-internal fun resolveSphereCaptureProfile(context: Context): SphereCaptureProfile {
-    val characteristics = runCatching { backCameraCharacteristics(context) }.getOrNull()
+internal fun resolveSphereCaptureProfile(
+    context: Context,
+    profile: SphereDeviceProfile,
+): SphereCaptureProfile {
+    val characteristics =
+        runCatching { backCameraCharacteristics(context, profile) }.getOrNull()
     return SphereCaptureProfile(
         focusMode = resolveFocusMode(
             afModes = characteristics?.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES),
             minimumFocusDistance =
                 characteristics?.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE),
         ),
-        burstPerTarget = SphereCaptureProfile.DEFAULT_BURST_PER_TARGET,
         aeLockSupported = resolveLockSupport(
             characteristics?.get(CameraCharacteristics.CONTROL_AE_LOCK_AVAILABLE)
         ),
@@ -128,18 +122,82 @@ internal fun resolveSphereCaptureProfile(context: Context): SphereCaptureProfile
     )
 }
 
-/** Characteristics of the rear camera, or null if none can be queried. */
-private fun backCameraCharacteristics(context: Context): CameraCharacteristics? {
+/**
+ * The back camera that captures the widest field of view, or null if none can
+ * be found.
+ *
+ * A photosphere is captured faster the wider each frame is, so the widest
+ * back-facing lens wins — on a Galaxy S23 that is the 12 MP ultrawide rather
+ * than the 50 MP main, which roughly halves the number of frames a sphere
+ * needs. Logical multi-cameras are skipped (they report their widest physical
+ * lens but are not individually bindable), and depth/macro sensors are
+ * excluded by requiring a real sensor behind the lens.
+ */
+internal fun widestBackCameraId(context: Context): String? {
     val manager = context.getSystemService(CameraManager::class.java) ?: return null
+    var bestId: String? = null
+    var bestFocal = Float.MAX_VALUE
     for (id in manager.cameraIdList) {
-        val characteristics = manager.getCameraCharacteristics(id)
-        if (characteristics.get(CameraCharacteristics.LENS_FACING) ==
+        val characteristics = runCatching { manager.getCameraCharacteristics(id) }.getOrNull()
+            ?: continue
+        if (characteristics.get(CameraCharacteristics.LENS_FACING) !=
             CameraCharacteristics.LENS_FACING_BACK
         ) {
-            return characteristics
+            continue
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
+            characteristics.physicalCameraIds.isNotEmpty()
+        ) {
+            continue
+        }
+        val focal = characteristics
+            .get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
+            ?.minOrNull()
+            ?: continue
+        val array = characteristics.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE)
+            ?: continue
+        if (array.width.toLong() * array.height < MIN_WIDE_SENSOR_PIXELS) continue
+        if (focal < bestFocal) {
+            bestFocal = focal
+            bestId = id
         }
     }
-    return null
+    return bestId
+}
+
+/** Smallest sensor a "wide" lens may have before it is a depth or macro toy. */
+private const val MIN_WIDE_SENSOR_PIXELS = 6_000_000L
+
+/** The ID of the default back camera (the main lens), or null if none. */
+internal fun defaultBackCameraId(context: Context): String? {
+    val manager = context.getSystemService(CameraManager::class.java) ?: return null
+    return manager.cameraIdList.firstOrNull { id ->
+        runCatching {
+            manager.getCameraCharacteristics(id)
+                .get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_BACK
+        }.getOrDefault(false)
+    }
+}
+
+/**
+ * The back camera to capture with, honouring the device profile's preference.
+ *
+ * Sharpness-first profiles pick the main lens; speed-first profiles pick the
+ * widest one. Either way, a missing or unbindable preference falls back to the
+ * main camera.
+ */
+internal fun captureBackCameraId(context: Context, profile: SphereDeviceProfile): String? =
+    if (profile.preferWidestCamera) {
+        widestBackCameraId(context) ?: defaultBackCameraId(context)
+    } else {
+        defaultBackCameraId(context)
+    }
+
+/** Characteristics of the chosen rear camera, or null if none can be queried. */
+private fun backCameraCharacteristics(context: Context, profile: SphereDeviceProfile): CameraCharacteristics? {
+    val manager = context.getSystemService(CameraManager::class.java) ?: return null
+    val id = captureBackCameraId(context, profile) ?: return null
+    return runCatching { manager.getCameraCharacteristics(id) }.getOrNull()
 }
 
 /**

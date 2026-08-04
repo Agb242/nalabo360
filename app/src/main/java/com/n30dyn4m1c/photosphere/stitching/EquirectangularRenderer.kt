@@ -83,6 +83,9 @@ internal object EquirectangularRenderer {
     /**
      * Renders [frames] into a [canvasWidth] × [canvasHeight] canvas.
      *
+     * [gains], when given, holds one brightness multiplier per frame, aligned by
+     * position with [frames]; it is applied before the overlaps are blended so
+     * the exposure compensation lands inside the mean rather than on top of it.
      * [onBandComplete] is called with the number of bands finished so far and
      * the total, for progress reporting; [checkCancelled] is called at every band
      * boundary and may throw to abandon the render.
@@ -91,6 +94,7 @@ internal object EquirectangularRenderer {
         frames: List<PreparedFrame>,
         canvasWidth: Int,
         canvasHeight: Int,
+        gains: FloatArray? = null,
         onBandComplete: (completed: Int, total: Int) -> Unit = { _, _ -> },
         checkCancelled: () -> Unit = {},
     ): Rendered {
@@ -110,6 +114,7 @@ internal object EquirectangularRenderer {
                     canvasHeight = canvasHeight,
                     bandTop = bandTop,
                     bandHeight = bandHeight,
+                    gains = gains,
                 )
                 onBandComplete(band + 1, bandCount)
             }
@@ -130,11 +135,13 @@ internal object EquirectangularRenderer {
         canvasHeight: Int,
         bandTop: Int,
         bandHeight: Int,
+        gains: FloatArray?,
     ): Long {
         val colorSum = Mat.zeros(bandHeight, canvasWidth, CvType.CV_32FC3)
         val weightSum = Mat.zeros(bandHeight, canvasWidth, CvType.CV_32FC1)
         try {
-            for (frame in frames) {
+            for (frameIndex in frames.indices) {
+                val frame = frames[frameIndex]
                 val footprint = frame.footprint
                 if (footprint.isEmpty) continue
 
@@ -154,6 +161,7 @@ internal object EquirectangularRenderer {
                         rowCount = rowEnd - rowStart,
                         columnStart = canvasColumn,
                         columnCount = columnSpan,
+                        gain = gains?.getOrNull(frameIndex) ?: 1f,
                     )
                 }
             }
@@ -186,6 +194,7 @@ internal object EquirectangularRenderer {
         rowCount: Int,
         columnStart: Int,
         columnCount: Int,
+        gain: Float,
     ) {
         if (rowCount <= 0 || columnCount <= 0) return
 
@@ -195,6 +204,7 @@ internal object EquirectangularRenderer {
         val centreY = intrinsics.centerYPx
         val maxColumn = intrinsics.widthPx - 1.0
         val maxRow = intrinsics.heightPx - 1.0
+        val radial = intrinsics.radial
 
         // Longitude is periodic, so a column that was unwrapped past the seam
         // gives the same direction as the column it wraps onto — the canvas
@@ -244,8 +254,22 @@ internal object EquirectangularRenderer {
                     sinLatitude * basis.rightZ
                 val vertical = cosLatitude * upHorizontal[columnOffset] + sinLatitude * basis.upZ
 
-                val sourceColumn = centreX + intrinsics.focalXPx * lateral / depth
-                val sourceRow = centreY - intrinsics.focalYPx * vertical / depth
+                // The lens model in two steps: the ideal pinhole pixel, then the
+                // radial push to where the lens actually recorded it. The ideal
+                // pixel is what the feather measures against — it is proportional
+                // to the angle off the optical axis — while the distorted pixel
+                // is what `remap` samples.
+                val idealColumn = centreX + intrinsics.focalXPx * lateral / depth
+                val idealRow = centreY - intrinsics.focalYPx * vertical / depth
+                var sourceColumn = idealColumn
+                var sourceRow = idealRow
+                if (radial != null) {
+                    val x = idealColumn - centreX
+                    val y = idealRow - centreY
+                    val factor = radialFactor(radial, x * x + y * y)
+                    sourceColumn = centreX + x * factor
+                    sourceRow = centreY + y * factor
+                }
                 if (sourceColumn < 0.0 || sourceColumn > maxColumn ||
                     sourceRow < 0.0 || sourceRow > maxRow
                 ) {
@@ -260,8 +284,8 @@ internal object EquirectangularRenderer {
                 // at the frame's border, so overlaps cross-fade. Raised to a
                 // power so the frame that sees the direction most head-on wins
                 // the blend instead of a wide linear cross-fade.
-                val acrossFrame = 1.0 - abs(sourceColumn - centreX) / centreX
-                val downFrame = 1.0 - abs(sourceRow - centreY) / centreY
+                val acrossFrame = 1.0 - abs(idealColumn - centreX) / centreX
+                val downFrame = 1.0 - abs(idealRow - centreY) / centreY
                 val weight = (acrossFrame * downFrame).pow(BLEND_POWER)
                 if (weight > 0.0) {
                     weights[index] = weight.toFloat()
@@ -283,18 +307,24 @@ internal object EquirectangularRenderer {
             mapYMat.put(0, 0, mapY)
             weightMat.put(0, 0, weights)
 
+            // Lanczos rather than linear: the canvas is now often rendered
+            // close to the frames' own resolution, and the sharper kernel keeps
+            // the edge detail that a linear filter would soften.
             Imgproc.remap(
                 frame.image,
                 warped,
                 mapXMat,
                 mapYMat,
-                Imgproc.INTER_LINEAR,
+                Imgproc.INTER_LANCZOS4,
                 Core.BORDER_CONSTANT,
                 Scalar(0.0, 0.0, 0.0),
             )
             warped.convertTo(warpedFloat, CvType.CV_32FC3)
             Core.merge(listOf(weightMat, weightMat, weightMat), weight3)
             Core.multiply(warpedFloat, weight3, warpedFloat)
+            if (gain != 1f) {
+                Core.multiply(warpedFloat, Scalar(gain.toDouble(), gain.toDouble(), gain.toDouble()), warpedFloat)
+            }
 
             val target = Rect(columnStart, rowStart - bandTop, columnCount, rowCount)
             val colorRegion = colorSum.submat(target)

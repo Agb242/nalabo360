@@ -70,6 +70,43 @@ class CameraBasis private constructor(
         cameraX * rightZ + cameraY * upZ + cameraZ * forwardZ,
     )
 
+    /**
+     * This basis as a row-major 3×3 rotation matrix mapping camera axes to the
+     * world frame. The columns are `[right, up, forward]` — `toWorld` is exactly
+     * the matrix times the camera-space vector. Exchanged with pose refinement,
+     * which works in rotation matrices.
+     */
+    fun toRotationMatrix(): DoubleArray = doubleArrayOf(
+        rightX, upX, forwardX,
+        rightY, upY, forwardY,
+        rightZ, upZ, forwardZ,
+    )
+
+    /** The [yawDegrees]/[pitchDegrees]/[rollDegrees] this basis was built from. */
+    fun toPose(): CameraPose {
+        val yaw = Math.toDegrees(atan2(forwardX, forwardY)).toFloat()
+        val elevation = Math.toDegrees(asin(forwardZ.coerceIn(-1.0, 1.0))).toFloat()
+        // Rebuild the unrolled pair for this yaw/elevation and measure how far
+        // the actual up/right pair has rolled about forward.
+        val yawR = Math.toRadians(yaw.toDouble())
+        val elevationR = Math.toRadians(elevation.toDouble())
+        val sinYaw = sin(yawR)
+        val cosYaw = cos(yawR)
+        val sinElevation = sin(elevationR)
+        val up0X = -sinYaw * sinElevation
+        val up0Y = -cosYaw * sinElevation
+        val up0Z = cos(elevationR)
+        val right0X = cosYaw
+        val right0Y = -sinYaw
+        val roll = Math.toDegrees(
+            atan2(
+                -(rightX * up0X + rightY * up0Y + rightZ * up0Z),
+                upX * up0X + upY * up0Y + upZ * up0Z,
+            )
+        ).toFloat()
+        return CameraPose(yawDegrees = yaw, pitchDegrees = -elevation, rollDegrees = roll)
+    }
+
     companion object {
         /**
          * Builds the basis for [pose].
@@ -114,6 +151,23 @@ class CameraBasis private constructor(
                 upZ = up0Z * cosRoll,
             )
         }
+
+        /**
+         * Builds the basis a row-major rotation matrix describes — the inverse
+         * of [toRotationMatrix]. [matrix] is expected to be orthonormal and
+         * right-handed, as the refinement pipeline produces.
+         */
+        fun fromRotationMatrix(matrix: DoubleArray): CameraBasis = CameraBasis(
+            rightX = matrix[0],
+            rightY = matrix[1],
+            rightZ = matrix[2],
+            upX = matrix[3],
+            upY = matrix[4],
+            upZ = matrix[5],
+            forwardX = matrix[6],
+            forwardY = matrix[7],
+            forwardZ = matrix[8],
+        )
     }
 }
 
@@ -133,6 +187,12 @@ data class FrameIntrinsics(
     val heightPx: Int,
     val focalXPx: Double,
     val focalYPx: Double,
+    /**
+     * Brown-Conrady radial coefficients `[k1, k2, k3]`, already rescaled to this
+     * frame's pixel size (see [RadialDistortion.effectiveFor]), or null when the
+     * camera does not describe its distortion.
+     */
+    val radial: DoubleArray? = null,
 ) {
     init {
         require(widthPx > 0 && heightPx > 0) { "frame must have positive extent" }
@@ -149,6 +209,7 @@ data class FrameIntrinsics(
             heightPx: Int,
             horizontalFovDegrees: Float,
             verticalFovDegrees: Float,
+            radial: DoubleArray? = null,
         ): FrameIntrinsics {
             require(horizontalFovDegrees in 1f..179f) { "horizontal fov: $horizontalFovDegrees" }
             require(verticalFovDegrees in 1f..179f) { "vertical fov: $verticalFovDegrees" }
@@ -157,6 +218,7 @@ data class FrameIntrinsics(
                 heightPx = heightPx,
                 focalXPx = (widthPx / 2.0) / tanHalf(horizontalFovDegrees),
                 focalYPx = (heightPx / 2.0) / tanHalf(verticalFovDegrees),
+                radial = radial,
             )
         }
 
@@ -331,20 +393,37 @@ object FrameFootprint {
     ): Boolean = projectDirection(basis, intrinsics, x, y, z) != null
 
     /** Calls [block] with the camera-frame ray of each sampled border pixel. */
-    private inline fun forEachBorderDirection(
+    private fun forEachBorderDirection(
         intrinsics: FrameIntrinsics,
         block: (cameraX: Double, cameraY: Double) -> Unit,
     ) {
         val lastColumn = intrinsics.widthPx - 1.0
         val lastRow = intrinsics.heightPx - 1.0
+        val radial = intrinsics.radial
+
+        // The border walked is the captured image's, whose pixels have passed
+        // through the lens. Before a pixel can be turned into a ray it has to
+        // be un-distorted back to where the pinhole model put it, or a
+        // barrel-distorted frame would report a footprint narrower than the
+        // true extent it reaches — exactly the kind of cropped edge that
+        // becomes a seam gap.
+        val border = { column: Double, row: Double ->
+            val ideal = if (radial != null) {
+                undistortPixel(column, row, intrinsics.centerXPx, intrinsics.centerYPx, radial)
+            } else {
+                doubleArrayOf(column, row)
+            }
+            block(cameraXOf(ideal[0], intrinsics), cameraYOf(ideal[1], intrinsics))
+        }
+
         for (step in 0..SAMPLES_PER_EDGE) {
             val fraction = step.toDouble() / SAMPLES_PER_EDGE
             val alongWidth = fraction * lastColumn
             val alongHeight = fraction * lastRow
-            block(cameraXOf(alongWidth, intrinsics), cameraYOf(0.0, intrinsics))
-            block(cameraXOf(alongWidth, intrinsics), cameraYOf(lastRow, intrinsics))
-            block(cameraXOf(0.0, intrinsics), cameraYOf(alongHeight, intrinsics))
-            block(cameraXOf(lastColumn, intrinsics), cameraYOf(alongHeight, intrinsics))
+            border(alongWidth, 0.0)
+            border(alongWidth, lastRow)
+            border(0.0, alongHeight)
+            border(lastColumn, alongHeight)
         }
     }
 
@@ -373,10 +452,12 @@ internal const val MIN_DEPTH = 1e-6
  * direction falls outside the frame or behind the camera.
  *
  * This is the whole of the camera model in five lines: rotate into the camera's
- * axes, divide through by depth, scale by the focal length. The renderer inlines
- * it over millions of pixels rather than calling it, so any change here has to
- * be made in both places — which is why the footprint code and the tests share
- * this one, keeping an independent statement of the same geometry.
+ * axes, divide through by depth, scale by the focal length, then push the ideal
+ * pixel through the lens's radial distortion to find where it was captured. The
+ * renderer inlines it over millions of pixels rather than calling it, so any
+ * change here has to be made in both places — which is why the footprint code
+ * and the tests share this one, keeping an independent statement of the same
+ * geometry.
  *
  * The returned array is `[column, row]` in the frame's pixel coordinates, where
  * rows increase downwards while the camera's "up" axis points the other way.
@@ -390,8 +471,22 @@ internal fun projectDirection(
 ): DoubleArray? {
     val depth = basis.depthOf(x, y, z)
     if (depth <= MIN_DEPTH) return null
-    val column = intrinsics.centerXPx + intrinsics.focalXPx * basis.lateralOf(x, y, z) / depth
-    val row = intrinsics.centerYPx - intrinsics.focalYPx * basis.verticalOf(x, y, z) / depth
+    val centreX = intrinsics.centerXPx
+    val centreY = intrinsics.centerYPx
+    val idealColumn = centreX + intrinsics.focalXPx * basis.lateralOf(x, y, z) / depth
+    val idealRow = centreY - intrinsics.focalYPx * basis.verticalOf(x, y, z) / depth
+
+    val radial = intrinsics.radial
+    val column: Double
+    val row: Double
+    if (radial != null) {
+        val distorted = distortPixel(idealColumn, idealRow, centreX, centreY, radial)
+        column = distorted[0]
+        row = distorted[1]
+    } else {
+        column = idealColumn
+        row = idealRow
+    }
     if (column < 0.0 || column > intrinsics.widthPx - 1.0) return null
     if (row < 0.0 || row > intrinsics.heightPx - 1.0) return null
     return doubleArrayOf(column, row)

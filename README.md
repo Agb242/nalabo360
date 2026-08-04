@@ -260,12 +260,20 @@ the loop that turns device attitude into frames. The user never presses a
 shutter: they move the reticle onto the next marker and hold.
 
 **The target list.** [`SphereTargetPlan`](app/src/main/java/com/n30dyn4m1c/photosphere/camera/SphereTarget.kt)
-lays out 44 targets on rings at 0°, ±30° and ±60° of elevation. Yaw spacing is
-30° at the equator and widens by `1 / cos(elevation)` above and below it, so
+lays its rings out to match the device's lens. The yaw gap on the equator is the
+horizontal field of view minus a 35% overlap target, so a wide-angle phone takes
+fewer, larger frames and a narrow one takes more, smaller ones — every frame
+covers roughly the same slice of the sphere. Ring elevations step up and down
+from the horizon by the same fraction of the *vertical* field of view, and the
+outermost ring always reaches the poles, so no lens leaves an uncovered cap at
+the top or bottom. Yaw spacing widens by `1 / cos(elevation)` so neighbouring
 frames stay a constant *angular* distance apart instead of bunching up as the
-rings shrink. Rings are swept in alternating directions, and the whole plan is
-rotated to start at whatever bearing the user is already facing — capture opens
-with the reticle on the first marker rather than asking for magnetic north.
+rings shrink. The 35% overlap is what the feature-based pose refinement needs:
+it leaves every frame well inside its neighbours' view (see
+[Stitching](#stitching)). Rings are swept in alternating directions, and the
+whole plan is rotated to start at whatever bearing the user is already facing —
+capture opens with the reticle on the first marker rather than asking for
+magnetic north.
 
 **Where a marker goes on screen.** [`SphereProjection`](app/src/main/java/com/n30dyn4m1c/photosphere/camera/SphereProjection.kt)
 rotates a target's direction out of the world frame into the camera's own frame
@@ -273,23 +281,48 @@ and divides through by depth — the same rectilinear projection the lens
 performs, so a marker lands on the pixel its target will actually occupy. The
 focal length comes from the camera's reported optics
 ([`CameraOptics`](app/src/main/java/com/n30dyn4m1c/photosphere/camera/CameraOptics.kt)),
-falling back to typical phone values if the camera will not describe itself.
-Roll is included, so tilting the phone turns the markers with the scene; it is
-deliberately excluded from the *distance* measure, since turning the phone in
-its own plane does not change where it is aimed.
+preferring the device's own intrinsic calibration and falling back to typical
+phone values if the camera will not describe itself. Roll is included, so
+tilting the phone turns the markers with the scene; it is deliberately excluded
+from the *distance* measure, since turning the phone in its own plane does not
+change where it is aimed.
 
 **The trigger.** [`AlignmentGate`](app/src/main/java/com/n30dyn4m1c/photosphere/camera/AlignmentGate.kt)
 fires once the aim has been within **2°** of the active target continuously for
 **300 ms**. The dwell is what keeps a frame from being taken mid-swing: at a
 normal pan rate the reticle crosses a 2° window in far less than 300 ms, so only
 a deliberate stop trips it. Any sample outside the window clears the timer
-outright. On success the shutter sound and a haptic tick fire together, the
-marker turns green, and focus animates onto the next target.
+outright. The shutter also refuses to fire while the fused sensor reports its
+readings as unreliable, and the attitude stamped onto each frame is the mean
+over the dwell rather than a single sample — both take the jitter out of the
+pose the stitcher starts from. On success the shutter sound and a haptic tick
+fire together, the marker turns green, and focus animates onto the next target.
 
 **Frames** are written full-resolution to the session's cache directory with the
 capture attitude stamped into EXIF `UserComment`, giving the stitcher a starting
 guess at where each frame belongs. Stale sessions are cleared when a new run
 starts.
+
+**Device tuning.** [`SphereDeviceProfile`](app/src/main/java/com/n30dyn4m1c/photosphere/camera/SphereDeviceProfile.kt)
+is where a specific phone is tuned, decided once per device. On a Samsung
+Galaxy S23 it is tuned for sharpness:
+
+- **Capture with the 50 MP main camera.** The main lens is the sharpest on the
+  phone — better glass, OIS, a far larger sensor than the ultrawide — so a
+  sphere shot on it is noticeably crisper. It costs more frames (~33 instead of
+  the ultrawide's ~11), which is the price of sharpness.
+- **Cap the stills at 12 MP.** Even though the main sensor is 50 MP, the stitch
+  reads ~2000 px per frame; capturing full-size is pure waste — slower writes,
+  a slower per-target burst, more heat.
+- **Stitch at 2000 → 6144.** Frames are decoded at a 2000 px long edge and the
+  sphere is rendered up to 6144 wide (Google's Photo Sphere standard is 5376),
+  so the main camera's detail reaches the finished photo instead of being
+  thrown away at 4096. Resampling uses a Lanczos kernel and a gentle masked
+  unsharp mask lifts the finished canvas.
+- **Burst three shots per target**, so a sharp survivor is more likely.
+
+On a phone without a wider lens the same code path falls back to the default
+back camera, so the tuning is specific without being fragile.
 
 The geometry, the target plan and the trigger rule are pure Kotlin, and are
 covered by local unit tests in
@@ -317,7 +350,28 @@ local OpenCV SDK ("Option B" above) does not change that.
 pointing for every frame — the shutter only fires when the device is held on a
 known target — which turns the expensive half of stitching, solving for each
 camera's rotation, into something already measured. What is left is a
-reprojection.
+reprojection, but the measured poses are not the last word:
+
+- [`PoseRefiner`](app/src/main/java/com/n30dyn4m1c/photosphere/stitching/PoseRefiner.kt)
+  matches ORB features between every overlapping pair of frames, recovers the
+  *content-observed* relative rotation of each pair with a pure-rotation RANSAC,
+  and runs a Gauss–Seidel solve over the whole pose graph with the sensor
+  rotations as the starting guess. The result is a small per-frame correction
+  that sharpens the overlaps to what the pixels agree on. The sensor stays the
+  anchor: every edge is sanity-checked against the sensor-relative rotation it
+  should be near, and a frame whose content gives no reliable matches keeps its
+  measured pose, so a featureless sky or a blank wall degrades gracefully to the
+  orientation-driven stitch rather than a failed one.
+- The lens's radial distortion is carried through the whole model. The camera's
+  `LENS_DISTORTION` coefficients ([`RadialDistortion`](app/src/main/java/com/n30dyn4m1c/photosphere/stitching/LensModel.kt))
+  describe how the lens bends the pinhole projection, so the renderer samples
+  the pixel the lens really recorded and the footprint walks the true (distorted)
+  border — frame edges, where seams live, land where they should instead of
+  bowing.
+- [`ExposureCompensation`](app/src/main/java/com/n30dyn4m1c/photosphere/stitching/ExposureCompensation.kt)
+  fits per-frame brightness gains against the overlap graph — a frame shot into
+  the sun and the frame beside it recorded against it no longer meet at a
+  brightness cliff inside the cross-fade.
 
 [`SphericalGeometry`](app/src/main/java/com/n30dyn4m1c/photosphere/stitching/SphericalGeometry.kt)
 holds the maths: a `CameraBasis` built from a frame's yaw/pitch/roll, the
@@ -332,17 +386,20 @@ out to the full width, because every longitude passes underneath it.
 [`EquirectangularRenderer`](app/src/main/java/com/n30dyn4m1c/photosphere/stitching/EquirectangularRenderer.kt)
 does the painting. Every output pixel is a direction; for each frame that
 direction is rotated into the frame's own axes and divided through by depth,
-which gives the pixel that looked at it, and `Imgproc.remap` samples it. Overlaps
-resolve to a weighted mean whose weight falls to zero at each frame's border, so
-a seam becomes a cross-fade rather than a line — and a pixel only one frame
-reached still comes out at full strength, because the weight divides back out.
+which gives the pixel that looked at it (through the distortion model), and
+`Imgproc.remap` samples it. The exposure gains are applied before the mean, so
+they land inside the blend. Overlaps resolve to a weighted mean whose weight
+falls to zero at each frame's border, so a seam becomes a cross-fade rather than
+a line — and a pixel only one frame reached still comes out at full strength,
+because the weight divides back out.
 
 The result is equirectangular *by construction* rather than by cropping
 something else into shape: a pixel's row is its latitude, so an incomplete sphere
 is black exactly where it was not shot, at the right elevation. The accuracy
-ceiling is the rotation vector sensor, which is fused and drift-free but not
-perfect; residual error shows up as soft doubling inside the overlaps rather
-than as a broken panorama.
+ceiling is how much of the residual pose error the content can resolve — the
+rotation vector sensor is fused and drift-free but not perfect, and the feature
+refinement pulls the overlaps back into agreement instead of leaving soft
+doubling.
 
 **Memory.** A 4096-wide canvas needs 100 MB of float accumulator if it is held
 at once, which is exactly the allocation that ends a stitch on a mid-range
@@ -409,16 +466,16 @@ read grant attached.
 
 ## Not implemented yet
 
-- **Refining the frame poses against the image content.** Frames are placed from
-  the rotation vector alone, so alignment is only as good as the sensor —
-  typically a degree or two, which at ~15 px per degree is a visible softness in
-  the overlaps. `features2d` and `calib3d` are both in the artifact, so the
-  intended fix is to match features between overlapping frames and solve for a
-  small per-frame correction on top of the measured pose, with the sensor value
-  as the starting guess and the fallback when a pair does not match. This is what
-  `StitchStatus.AlignmentFailed` and `CameraEstimationFailed` are reserved for;
-  nothing currently produces them.
-- **Exposure compensation.** Frames shot into and away from the sun are blended
-  at their captured brightness, so a bright frame stays bright inside the
-  cross-fade. Equalising gain across the set before blending is the usual
-  remedy.
+- **Focal-length refinement.** The pose refinement assumes the camera's reported
+  focal length is right. It usually is — the optics come from the device's own
+  intrinsic calibration — but solving for a small per-frame focal correction
+  alongside the rotations (Brown & Lowe's step) would absorb the last bit of
+  scale error a loosely-described lens leaves behind.
+- **Multi-band blending.** The feathered weighted mean hides a residual pose
+  error well, but at high contrast (a dark doorway against a bright wall) a
+  Laplacian-pyramid blend would hide it better. That is a larger renderer
+  change, and the sharper the refined poses are, the less the seams need it.
+- **Seam carving.** Instead of blending every overlap, find the path through
+  each overlap where the frames agree most and cut there, fading only a few
+  pixels across it. The current cross-fade trades a little sharpness for the
+  certainty of never exposing a gap.

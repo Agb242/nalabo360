@@ -3,6 +3,8 @@ package com.n30dyn4m1c.photosphere.camera
 import com.n30dyn4m1c.photosphere.sensor.OrientationData
 import com.n30dyn4m1c.photosphere.sensor.normalizeDegrees
 import kotlin.math.cos
+import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.roundToInt
 
 /**
@@ -70,13 +72,16 @@ data class SphereTargetPlan(val targets: List<SphereTarget>) {
 
         /**
          * How much of each frame its neighbours may re-shoot, as a fraction of
-         * the horizontal field of view.
+         * the field of view.
          *
-         * This stitcher works from measured poses rather than feature matches,
-         * so overlap only has to absorb capture error — a small overlap keeps
-         * the sphere covered without doubling every object up in a soft blend.
+         * This stitcher refines the measured poses by matching features between
+         * overlapping frames, so the overlap has to be wide enough for a
+         * feature-based stitcher to find its bearings — 35% keeps every frame
+         * well inside its neighbours' view while still leaving each one enough
+         * of the sphere to itself. It is also what absorbs capture error: a
+         * small overlap would turn a degree of sensor drift into a missed edge.
          */
-        const val DEFAULT_TARGET_OVERLAP_FRACTION: Float = 0.25f
+        const val DEFAULT_TARGET_OVERLAP_FRACTION: Float = 0.35f
 
         /**
          * Lays out a sphere whose first target sits at [startYawDegrees].
@@ -103,18 +108,24 @@ data class SphereTargetPlan(val targets: List<SphereTarget>) {
          * takes more, smaller frames — every frame covers roughly the same
          * slice of the sphere instead of the fixed 30° spacing piling up far
          * more overlap on wide lenses.
+         *
+         * Ring elevations adapt to the *vertical* field of view the same way,
+         * and always reach far enough up to cover the poles, so no lens leaves
+         * an uncovered cap at the top or bottom of the sphere.
          */
         fun createForFieldOfView(
             startYawDegrees: Float,
             fieldOfView: FieldOfView,
-            ringElevations: List<Float> = DEFAULT_RING_ELEVATIONS,
+            ringElevations: List<Float>? = null,
             targetOverlapFraction: Float = DEFAULT_TARGET_OVERLAP_FRACTION,
         ): SphereTargetPlan {
             require(targetOverlapFraction in 0f..1f) {
                 "overlap fraction must be between 0 and 1, was $targetOverlapFraction"
             }
+            val elevations = ringElevations
+                ?: adaptiveRingElevations(fieldOfView.verticalDegrees, targetOverlapFraction)
             val spacing = fieldOfView.horizontalDegrees * (1f - targetOverlapFraction)
-            return createUnchecked(startYawDegrees, ringElevations, spacing)
+            return createUnchecked(startYawDegrees, elevations, spacing)
         }
 
         private fun createUnchecked(
@@ -148,6 +159,55 @@ data class SphereTargetPlan(val targets: List<SphereTarget>) {
             val count = (360f / spacing).roundToInt().coerceAtLeast(1)
             val step = 360f / count
             return List(count) { normalizeDegrees(startYawDegrees + it * step) }
+        }
+
+        /**
+         * The tallest ring the yaw spacing survives.
+         *
+         * Rings this high have shrunk to a handful of frames; going beyond it
+         * would make the `1 / cos(elevation)` widening of [ringYaws] degenerate
+         * and silently break the constant-overlap guarantee.
+         */
+        const val MAX_RING_ELEVATION_DEGREES: Float = 75f
+
+        /**
+         * Ring elevations that cover the whole sphere for a given vertical lens.
+         *
+         * Rings step up and down from the horizon by `vFov × (1 − overlap)`, so
+         * the vertical overlap is guaranteed regardless of how narrow or wide the
+         * lens is, and the outermost ring always reaches the poles — its upper
+         * edge lands past ±90° with room to spare. Without it, a lens whose
+         * rings were laid out for another lens's field of view would leave an
+         * uncovered cap at the top and bottom of the sphere.
+         */
+        internal fun adaptiveRingElevations(
+            verticalFovDegrees: Float,
+            overlapFraction: Float,
+        ): List<Float> {
+            require(verticalFovDegrees in 1f..179f) { "vertical fov: $verticalFovDegrees" }
+            require(overlapFraction in 0f..1f) { "overlap: $overlapFraction" }
+            val step = verticalFovDegrees * (1f - overlapFraction)
+            // The top ring's upper edge must clear the pole by a good margin, so
+            // it is parked half a step beyond the point where its centre alone
+            // would just touch it.
+            val cap = min(
+                MAX_RING_ELEVATION_DEGREES,
+                max(step, 90f - verticalFovDegrees / 2f + step / 2f),
+            )
+            val elevations = mutableListOf(0f)
+            // Intermediate rings only while they are clearly below the cap — a
+            // ring within half a step of it would be a near-duplicate zenith
+            // ring, which an ultra-wide lens (a step of ~70° plus a cap of ~72°)
+            // would otherwise produce.
+            var elevation = step
+            while (elevation < cap - step / 2f) {
+                elevations += elevation
+                elevations += -elevation
+                elevation += step
+            }
+            elevations += cap
+            elevations += -cap
+            return elevations
         }
     }
 }

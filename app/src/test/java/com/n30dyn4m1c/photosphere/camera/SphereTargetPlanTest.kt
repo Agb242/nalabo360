@@ -124,6 +124,65 @@ class SphereTargetPlanTest {
         assertEquals(listOf(0f, 90f, -180f, -90f), plan.targets.map { it.yawDegrees })
     }
 
+    @Test
+    fun `adaptive rings step with the vertical field of view and reach the poles`() {
+        val vFov = 66f
+        val overlap = SphereTargetPlan.DEFAULT_TARGET_OVERLAP_FRACTION
+        val step = vFov * (1f - overlap)
+        val elevations = SphereTargetPlan.adaptiveRingElevations(vFov, overlap)
+
+        // The horizon is always the first ring, and rings are symmetric.
+        assertTrue(elevations.contains(0f))
+        elevations.filter { it != 0f }.forEach {
+            assertTrue("ring $it has no mirror", elevations.contains(-it))
+        }
+
+        // The first ring above the horizon is one vertical step up, so vertical
+        // overlap is guaranteed whatever the lens.
+        val positive = elevations.filter { it > 0f }.sorted()
+        assertEquals("first ring above the horizon", step, positive.first(), 1f)
+
+        // And the top ring must cover the pole with room to spare.
+        val top = elevations.maxOf { abs(it) }
+        assertTrue("top ring $top leaves the pole uncovered", top + vFov / 2f >= 90f)
+    }
+
+    @Test
+    fun `a narrower lens gets more rings than a wider one`() {
+        val narrow = SphereTargetPlan.createForFieldOfView(
+            startYawDegrees = 0f,
+            fieldOfView = FieldOfView(horizontalDegrees = 52f, verticalDegrees = 40f),
+        )
+        val wide = SphereTargetPlan.createForFieldOfView(
+            startYawDegrees = 0f,
+            fieldOfView = FieldOfView(horizontalDegrees = 76f, verticalDegrees = 90f),
+        )
+
+        // A small vertical field of view needs more, thinner rings to cover the
+        // same sphere; every target still stays inside the legal band.
+        assertTrue("narrow lens took fewer frames", narrow.size > wide.size)
+        narrow.targets.forEach { target ->
+            assertTrue(
+                "elevation ${target.elevationDegrees} outside the band",
+                abs(target.elevationDegrees) <= 75f + TOLERANCE,
+            )
+        }
+    }
+
+    @Test
+    fun `an ultra-wide lens does not stack near-duplicate zenith rings`() {
+        // The S23's ultrawide in portrait has a ~105° vertical field of view,
+        // which puts the vertical step (~68°) and the pole-covering cap (~72°)
+        // within half a step of each other — the intermediate ring would be a
+        // near-duplicate, so only the cap ring is laid out above the horizon.
+        val elevations = SphereTargetPlan.adaptiveRingElevations(105f, 0.35f)
+        val positive = elevations.filter { it > 0f }.sorted()
+
+        assertEquals(1, positive.size)
+        val top = positive.first()
+        assertTrue("cap $top leaves the pole uncovered", top + 105f / 2f >= 90f)
+    }
+
     /** Great-circle angle between two targets, for checking coverage. */
     private fun angularDistance(a: SphereTarget, b: SphereTarget): Float =
         SphereProjection.angularDistanceDegrees(

@@ -87,7 +87,10 @@ class SphereCaptureProfileTest {
     }
 
     @Test
-    fun `the shipped burst default is a pair`() {
-        assertEquals(2, SphereCaptureProfile.DEFAULT_BURST_PER_TARGET)
+    fun `the default device profile keeps a sane capture configuration`() {
+        val profile = SphereDeviceProfile.forDevice()
+        assertTrue(profile.preferWidestCamera)
+        assertTrue("capture cap ${profile.captureMaxLongEdgePx}", profile.captureMaxLongEdgePx >= 3000)
+        assertTrue("burst ${profile.burstPerTarget}", profile.burstPerTarget >= 2)
     }
 }

@@ -13,7 +13,10 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import org.opencv.android.OpenCVLoader
 import org.opencv.android.Utils
+import org.opencv.core.Core
 import org.opencv.core.Mat
+import org.opencv.core.Scalar
+import org.opencv.core.Size
 import org.opencv.imgproc.Imgproc
 import java.io.File
 import kotlin.math.roundToInt
@@ -82,6 +85,9 @@ enum class StitchStage {
     /** Decoding buffered frames into matrices. */
     Reading,
 
+    /** Matching features between overlapping frames and correcting the poses. */
+    Refining,
+
     /** Projecting frames onto the sphere and blending the overlaps. */
     Stitching,
 
@@ -92,11 +98,11 @@ enum class StitchStage {
 /**
  * How far along a stitch is.
  *
- * [StitchStage.Reading] and [StitchStage.Stitching] both report real progress —
- * one frame and one band of canvas at a time. The short stages either side leave
- * [fraction] null, and the UI shows an indeterminate spinner for those rather
- * than a bar that lies.
- */
+     * [StitchStage.Reading], [StitchStage.Refining] and [StitchStage.Stitching]
+     * all report real progress — one frame, one edge and one band of canvas at
+     * a time. The short stages either side leave [fraction] null, and the UI
+     * shows an indeterminate spinner for those rather than a bar that lies.
+     */
 data class StitchProgress(
     val stage: StitchStage,
     val completed: Int = 0,
@@ -139,13 +145,18 @@ data class SphereFrame(
  * and divided through by depth to find the pixel that saw it. Overlaps are
  * resolved by a feathered weighted mean, so seams cross-fade.
  *
- * The result is equirectangular by construction rather than by cropping
+ * The measured poses are not the last word. [PoseRefiner] matches ORB features
+ * between overlapping frames and solves for a small per-frame correction on top
+ * of the sensor pose — the sensor stays the starting guess and the fallback, and
+ * the image content decides the fine alignment. The lens's radial distortion is
+ * carried through the whole model (see [RadialDistortion]) so frame edges,
+ * where seams live, land where the lens really put them, and
+ * [ExposureCompensation] equalises per-frame brightness so the blends do not
+ * show seams of light.
+ *
+ * The result is equirectangular *by construction* rather than by cropping
  * something else into shape: a pixel's row *is* its latitude, so an incomplete
  * sphere is black exactly where it was not shot, at the right elevation.
- *
- * The accuracy ceiling is the rotation vector sensor, which is fused and
- * drift-free but not perfect; residual error shows up as soft doubling in the
- * overlaps rather than as a broken panorama.
  *
  * Everything runs on [Dispatchers.Default] — it is compute-bound — and failures
  * come back as a failed [Result] holding a [StitchException]. A sphere that was
@@ -175,6 +186,12 @@ object PhotoSphereStitcher {
      */
     private const val MIN_COVERAGE = 0.02f
 
+    /** Gaussian sigma for the unsharp mask, in output pixels. */
+    private const val UNSHARP_RADIUS = 1.5
+
+    /** Pixels brighter than this count as shot content rather than a gap. */
+    private const val UNSHARP_CONTENT_THRESHOLD = 24.0
+
     @Volatile
     private var isOpenCvReady: Boolean = false
 
@@ -202,6 +219,13 @@ object PhotoSphereStitcher {
      * whole panorama: too narrow leaves gaps between frames, too wide overlaps
      * them.
      *
+     * [radialDistortion], when the optics reported one, carries the lens's
+     * Brown-Conrady coefficients through the projection so frame edges land
+     * where the lens put them.
+     *
+     * [unsharpAmount] (0 = off) is the strength of a masked unsharp mask
+     * applied to the finished canvas — the perceived crispness of the output.
+     *
      * [onProgress] is called from the stitching thread, not the main one — hand
      * the value to a `StateFlow` or post it rather than writing Compose state
      * from it directly.
@@ -212,11 +236,13 @@ object PhotoSphereStitcher {
         frames: List<SphereFrame>,
         horizontalFovDegrees: Float,
         verticalFovDegrees: Float,
+        radialDistortion: RadialDistortion? = null,
         maxInputDimension: Int = DEFAULT_MAX_INPUT_DIMENSION,
         maxOutputWidth: Int = DEFAULT_MAX_OUTPUT_WIDTH,
+        unsharpAmount: Float = 0f,
         onProgress: (StitchProgress) -> Unit = {},
     ): Result<Bitmap> = withContext(Dispatchers.Default) {
-        val prepared = ArrayList<PreparedFrame>(frames.size)
+        val decoded = ArrayList<DecodedFrame>(frames.size)
         try {
             onProgress(StitchProgress.Preparing)
 
@@ -246,11 +272,13 @@ object PhotoSphereStitcher {
                 onProgress(StitchProgress(StitchStage.Reading, position, frames.size))
 
                 val image = readFrame(frame.file, maxInputDimension)
+                val longest = maxOf(image.cols(), image.rows())
                 val intrinsics = FrameIntrinsics.fromFieldOfView(
                     widthPx = image.cols(),
                     heightPx = image.rows(),
                     horizontalFovDegrees = horizontalFovDegrees,
                     verticalFovDegrees = verticalFovDegrees,
+                    radial = radialDistortion?.effectiveFor(longest),
                 )
                 if (position == 0) {
                     canvasWidth = canvasWidthFor(
@@ -259,9 +287,33 @@ object PhotoSphereStitcher {
                         maxOutputWidth = maxOutputWidth,
                     )
                 }
-                val basis = CameraBasis.of(frame.pose)
-                prepared += PreparedFrame(
+                decoded += DecodedFrame(
                     image = image,
+                    intrinsics = intrinsics,
+                    sensorBasis = CameraBasis.of(frame.pose),
+                )
+            }
+            onProgress(StitchProgress(StitchStage.Reading, frames.size, frames.size))
+
+            ensureActive()
+            // Match overlapping frames and correct the measured poses against the
+            // content. Falls back to the sensor poses when nothing matches.
+            val refinement = PoseRefiner.refine(
+                frames = decoded,
+                horizontalFovDegrees = horizontalFovDegrees,
+                verticalFovDegrees = verticalFovDegrees,
+                onProgress = { completed, total ->
+                    onProgress(StitchProgress(StitchStage.Refining, completed, total))
+                },
+            )
+
+            val prepared = ArrayList<PreparedFrame>(decoded.size)
+            decoded.indices.forEach { index ->
+                ensureActive()
+                val basis = refinement.bases[index]
+                val intrinsics = decoded[index].intrinsics
+                prepared += PreparedFrame(
+                    image = decoded[index].image,
                     basis = basis,
                     intrinsics = intrinsics,
                     footprint = FrameFootprint.compute(
@@ -272,7 +324,6 @@ object PhotoSphereStitcher {
                     ),
                 )
             }
-            onProgress(StitchProgress(StitchStage.Reading, frames.size, frames.size))
 
             ensureActive()
             onProgress(StitchProgress(StitchStage.Stitching))
@@ -283,6 +334,7 @@ object PhotoSphereStitcher {
                 frames = prepared,
                 canvasWidth = canvasWidth,
                 canvasHeight = canvasWidth / 2,
+                gains = refinement.gains,
                 onBandComplete = { completed, total ->
                     onProgress(StitchProgress(StitchStage.Stitching, completed, total))
                 },
@@ -305,6 +357,7 @@ object PhotoSphereStitcher {
 
                 ensureActive()
                 onProgress(StitchProgress(StitchStage.Projecting))
+                applyUnsharpMask(rendered.canvas, unsharpAmount)
                 Result.success(toBitmap(rendered.canvas))
             } finally {
                 rendered.canvas.release()
@@ -328,7 +381,9 @@ object PhotoSphereStitcher {
                 StitchException(StitchStatus.Unknown, e.message ?: "Stitch failed", e)
             )
         } finally {
-            prepared.forEach { it.image.release() }
+            // `prepared` and `decoded` share the same Mats; releasing the decoded
+            // set covers every path, including a failure mid-decode or mid-refine.
+            decoded.forEach { it.image.release() }
         }
     }
 
@@ -385,6 +440,35 @@ object PhotoSphereStitcher {
         val bitmap = Bitmap.createBitmap(canvas.cols(), canvas.rows(), Bitmap.Config.ARGB_8888)
         Utils.matToBitmap(canvas, bitmap)
         return bitmap
+    }
+
+    /**
+     * Applies a masked unsharp mask to the finished canvas.
+     *
+     * `out = src + amount·(src − blur)` lifts the edge contrast that reads as
+     * sharpness. The mask restricts it to pixels that were actually shot: the
+     * black bands where the sphere was never captured must not grow a bright
+     * rim, and near-black pixels (a night shot) are left alone so noise is not
+     * sharpened along with the edges.
+     */
+    private fun applyUnsharpMask(canvas: Mat, amount: Float) {
+        if (amount <= 0f) return
+        val blurred = Mat()
+        val sharpened = Mat()
+        val gray = Mat()
+        val mask = Mat()
+        try {
+            Imgproc.GaussianBlur(canvas, blurred, Size(0.0, 0.0), UNSHARP_RADIUS)
+            Core.addWeighted(canvas, 1.0 + amount, blurred, -amount.toDouble(), 0.0, sharpened)
+            Imgproc.cvtColor(canvas, gray, Imgproc.COLOR_RGB2GRAY)
+            Core.compare(gray, Scalar(UNSHARP_CONTENT_THRESHOLD), mask, Core.CMP_GT)
+            sharpened.copyTo(canvas, mask)
+        } finally {
+            blurred.release()
+            sharpened.release()
+            gray.release()
+            mask.release()
+        }
     }
 
     /** Decodes [file] no larger than [maxDimension], with EXIF rotation applied. */

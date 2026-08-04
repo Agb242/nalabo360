@@ -1,8 +1,14 @@
+@file:OptIn(androidx.camera.camera2.interop.ExperimentalCamera2Interop::class)
+@file:SuppressLint("UnsafeOptInUsageError")
+
 package com.n30dyn4m1c.photosphere.camera
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.os.SystemClock
 import android.util.Log
+import android.util.Size
+import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.camera2.interop.Camera2Interop
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
@@ -61,6 +67,7 @@ import com.n30dyn4m1c.photosphere.R
 import com.n30dyn4m1c.photosphere.sensor.OrientationAccuracy
 import com.n30dyn4m1c.photosphere.sensor.OrientationData
 import com.n30dyn4m1c.photosphere.sensor.currentDisplayRotation
+import com.n30dyn4m1c.photosphere.sensor.meanOrientation
 import com.n30dyn4m1c.photosphere.sensor.rememberOrientationTracker
 import com.n30dyn4m1c.photosphere.stitching.CameraPose
 import com.n30dyn4m1c.photosphere.stitching.PhotoSphereStitcher
@@ -135,7 +142,9 @@ fun PhotoSphereCameraScreen(
     // lambda reads it.
     val orientationState = tracker.orientation.collectAsStateWithLifecycle()
     val feedback = rememberCaptureFeedback()
-    val fieldOfView = rememberCameraFieldOfView()
+    val optics = rememberSphereOptics()
+    val fieldOfView = optics.fieldOfView
+    val deviceProfile = remember { SphereDeviceProfile.forDevice() }
 
     val previewView = remember(context) {
         PreviewView(context).apply {
@@ -189,8 +198,18 @@ fun PhotoSphereCameraScreen(
             return@LaunchedEffect
         }
 
-        val profile = resolveSphereCaptureProfile(context)
+        val profile = resolveSphereCaptureProfile(context, deviceProfile)
         captureProfile = profile
+
+        // A sphere is captured faster the wider each frame is, so the widest
+        // back lens is preferred (the 12 MP ultrawide on the S23 rather than
+        // the 50 MP main). Falls back to the default back camera if that lens
+        // cannot be bound.
+        val cameraSelector = if (deviceProfile.preferWidestCamera) {
+            widestCameraSelector(context) ?: CameraSelector.DEFAULT_BACK_CAMERA
+        } else {
+            CameraSelector.DEFAULT_BACK_CAMERA
+        }
 
         // Exposure, white balance and focus are locked for the whole session
         // (see SphereCaptureProfile): a sphere's seams are exposure and colour
@@ -208,9 +227,22 @@ fun PhotoSphereCameraScreen(
             // Frames are stitched, so a flash firing on some of them would leave
             // seams no amount of blending can hide.
             .setFlashMode(ImageCapture.FLASH_MODE_OFF)
+            // Capture is capped to what the stitch can use: it reads ~1024 px
+            // per frame, so a 50 MP still (the S23's main sensor at full size)
+            // is pure waste — it is slower to write, slows the per-target burst,
+            // and heats the phone up for nothing. 12 MP 4:3 is several times
+            // more resolution than the stitch reads.
             .setResolutionSelector(
                 ResolutionSelector.Builder()
-                    .setResolutionStrategy(ResolutionStrategy.HIGHEST_AVAILABLE_STRATEGY)
+                    .setResolutionStrategy(
+                        ResolutionStrategy(
+                            Size(
+                                deviceProfile.captureMaxLongEdgePx,
+                                deviceProfile.captureMaxLongEdgePx * 3 / 4,
+                            ),
+                            ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER,
+                        )
+                    )
                     .build()
             )
             .setTargetRotation(context.currentDisplayRotation())
@@ -220,12 +252,17 @@ fun PhotoSphereCameraScreen(
 
         try {
             cameraProvider.unbindAll()
-            val camera = cameraProvider.bindToLifecycle(
-                lifecycleOwner,
-                CameraSelector.DEFAULT_BACK_CAMERA,
-                preview,
-                capture,
-            )
+            val camera = try {
+                cameraProvider.bindToLifecycle(lifecycleOwner, cameraSelector, preview, capture)
+            } catch (e: Exception) {
+                Log.w(TAG, "Widest camera unavailable, binding the default", e)
+                cameraProvider.bindToLifecycle(
+                    lifecycleOwner,
+                    CameraSelector.DEFAULT_BACK_CAMERA,
+                    preview,
+                    capture,
+                )
+            }
             imageCapture = capture
             boundCamera = camera
         } catch (e: Exception) {
@@ -250,6 +287,13 @@ fun PhotoSphereCameraScreen(
         val profile = captureProfile ?: return@LaunchedEffect
         val gate = AlignmentGate()
 
+        // The pose stamped onto each frame is the mean over a short window of
+        // samples. The gate has just confirmed the aim held still for a dwell,
+        // so the window is all deliberate stops, and its mean is a quieter
+        // estimate of where the camera was than the single last sample.
+        val poseWindow = ArrayDeque<OrientationData>()
+        val poseWindowSize = 20
+
         // Devices that cannot park focus at infinity hold it at the first scene
         // instead. AE and AWB are already locked by the session, so this pins
         // the last free variable before any frame is taken; the trigger lands
@@ -261,6 +305,9 @@ fun PhotoSphereCameraScreen(
         tracker.orientation.collect { orientation ->
             if (!orientation.hasFix) return@collect
             accuracy = orientation.accuracy
+
+            poseWindow.addLast(orientation)
+            while (poseWindow.size > poseWindowSize) poseWindow.removeFirst()
 
             // A frame landing halfway through a stitch would not be in the set
             // being stitched, and would be deleted when that set is cleared.
@@ -285,6 +332,19 @@ fun PhotoSphereCameraScreen(
             }
 
             val distance = SphereProjection.angularDistanceDegrees(orientation, target)
+
+            // Careful shooting: no frame is taken while the fused sensor doubts
+            // itself. An unreliable magnetometer drifts the reported aim by
+            // degrees even when the phone is still, and a frame placed on the
+            // sphere by that aim would land off its target no matter how long
+            // it is held.
+            if (!orientation.accuracy.isUsable) {
+                gate.reset()
+                alignment = AlignmentState(distanceDegrees = distance)
+                isHolding = false
+                return@collect
+            }
+
             val reading = gate.update(distance, SystemClock.elapsedRealtime())
             alignment = AlignmentState(
                 distanceDegrees = distance,
@@ -292,6 +352,12 @@ fun PhotoSphereCameraScreen(
                 isAligned = reading.isAligned,
             )
             isHolding = reading.isAligned
+
+            // The pose mean is only trustworthy if every sample in it came from
+            // this deliberate stop, so a sample that fails the gate empties the
+            // window again. When the shutter fires, the window is exactly the
+            // dwell.
+            if (!reading.isAligned) poseWindow.clear()
 
             if (!reading.isTriggered) return@collect
 
@@ -301,8 +367,8 @@ fun PhotoSphereCameraScreen(
                 context = context,
                 buffer = buffer,
                 index = index,
-                orientation = orientation,
-                burstPerTarget = profile.burstPerTarget,
+                orientation = meanOrientation(poseWindow.toList()),
+                burstPerTarget = deviceProfile.burstPerTarget,
             )
             alignment = alignment.copy(isCapturing = false)
 
@@ -365,6 +431,10 @@ fun PhotoSphereCameraScreen(
                     frames = frames,
                     horizontalFovDegrees = fieldOfView.horizontalDegrees,
                     verticalFovDegrees = fieldOfView.verticalDegrees,
+                    radialDistortion = optics.radialDistortion,
+                    maxInputDimension = deviceProfile.stitchMaxInputDimension,
+                    maxOutputWidth = deviceProfile.stitchMaxOutputWidth,
+                    unsharpAmount = deviceProfile.unsharpAmount,
                 ) { stitchProgress.value = it }
                     .onSuccess { sphere ->
                         val stitched = try {
@@ -683,6 +753,7 @@ private fun StitchingDialog(
 private fun StitchProgress.label(): String = when (stage) {
     StitchStage.Preparing -> stringResource(R.string.stitch_stage_preparing)
     StitchStage.Reading -> stringResource(R.string.stitch_stage_reading, completed, total)
+    StitchStage.Refining -> stringResource(R.string.stitch_stage_refining, completed, total)
     StitchStage.Stitching -> stringResource(R.string.stitch_stage_stitching)
     StitchStage.Projecting -> stringResource(R.string.stitch_stage_projecting)
 }
@@ -842,6 +913,27 @@ private suspend fun ImageCapture.takePictureTo(
             }
         },
     )
+}
+
+/**
+ * A [CameraSelector] for the widest physical back camera, or null when it
+ * cannot be identified.
+ *
+ * CameraX filters the available cameras down to the one with the matching
+ * camera2 id, so the preview and stills bind to the same lens
+ * [widestBackCameraId] picks for the optics. A filter that matches nothing
+ * makes [ProcessCameraProvider.bindToLifecycle] throw, which the caller turns
+ * into a fall back to the default back camera.
+ */
+private fun widestCameraSelector(context: Context): CameraSelector? {
+    val id = widestBackCameraId(context) ?: return null
+    return CameraSelector.Builder()
+        .addCameraFilter { cameras ->
+            cameras.filter { camera ->
+                runCatching { Camera2CameraInfo.from(camera).cameraId }.getOrNull() == id
+            }
+        }
+        .build()
 }
 
 /**

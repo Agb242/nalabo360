@@ -36,7 +36,8 @@
     <string name="stitch_title">Building your sphere</string>
     <string name="stitch_stage_preparing">Getting ready…</string>
     <string name="stitch_stage_reading">Reading frames (%1$d / %2$d)</string>
-    <string name="stitch_stage_stitching">Aligning and blending frames…</string>
+    <string name="stitch_stage_refining">Aligning frames (%1$d / %2$d)</string>
+    <string name="stitch_stage_stitching">Blending frames…</string>
     <string name="stitch_stage_projecting">Shaping the equirectangular image…</string>
     <string name="stitch_cancel">Cancel</string>
     <string name="stitch_failed">Stitch failed. %1$s</string>

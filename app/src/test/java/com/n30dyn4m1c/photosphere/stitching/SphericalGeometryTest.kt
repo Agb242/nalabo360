@@ -372,6 +372,94 @@ class SphericalGeometryTest {
         assertEquals(250.0, intrinsics.focalYPx, 1e-6)
     }
 
+    @Test
+    fun `a basis round-trips through the pose it was built from`() {
+        for (yaw in -170..170 step 30) {
+            for (pitch in -70..70 step 20) {
+                for (roll in -160..150 step 40) {
+                    val pose = CameraPose(yaw.toFloat(), pitch.toFloat(), roll.toFloat())
+                    val basis = CameraBasis.of(pose)
+                    val recovered = CameraBasis.of(basis.toPose())
+                    assertEquals(
+                        "yaw $yaw pitch $pitch roll $roll",
+                        0.0,
+                        RotationMath.angle(
+                            basis.toRotationMatrix(),
+                            recovered.toRotationMatrix(),
+                        ),
+                        1e-6,
+                    )
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `the optical axis is untouched by radial distortion`() {
+        val basis = CameraBasis.of(CameraPose(0f, 0f, 0f))
+        val intrinsics = FrameIntrinsics.fromFieldOfView(
+            400, 400, 60f, 60f,
+            radial = doubleArrayOf(-2.5e-7, 0.0, 0.0),
+        )
+
+        // Facing north along the axis: the ideal pixel is the centre and the
+        // distortion factor there is exactly 1.
+        val pixel = projectDirection(basis, intrinsics, 0.0, 1.0, 0.0)
+        assertNotNull(pixel)
+        assertEquals(intrinsics.centerXPx, pixel!![0], 1e-6)
+        assertEquals(intrinsics.centerYPx, pixel[1], 1e-6)
+    }
+
+    @Test
+    fun `an off-axis direction lands elsewhere once the lens is distorted`() {
+        val basis = CameraBasis.of(CameraPose(0f, 0f, 0f))
+        val pinhole = FrameIntrinsics.fromFieldOfView(400, 400, 60f, 60f)
+        val lens = FrameIntrinsics.fromFieldOfView(
+            400, 400, 60f, 60f,
+            radial = doubleArrayOf(-2.5e-7, 0.0, 0.0),
+        )
+        val direction = Equirectangular.direction(28.0, 12.0)
+
+        val atPinhole = projectDirection(basis, pinhole, direction[0], direction[1], direction[2])
+        val atLens = projectDirection(basis, lens, direction[0], direction[1], direction[2])
+        assertNotNull(atPinhole)
+        assertNotNull(atLens)
+        assertTrue(
+            "barrel distortion should pull the pixel inward",
+            abs(atPinhole!![0] - atLens!![0]) + abs(atPinhole[1] - atLens[1]) > 1.0,
+        )
+    }
+
+    @Test
+    fun `a barrel-distorted frame paints a wider footprint than a pinhole`() {
+        val basis = CameraBasis.of(CameraPose(0f, 0f, 0f))
+        val plain = FrameFootprint.compute(
+            basis = basis,
+            intrinsics = FrameIntrinsics.fromFieldOfView(1000, 1000, 60f, 60f),
+            canvasWidth = 3600,
+            canvasHeight = 1800,
+            marginPx = 0,
+        )
+        val barrel = FrameFootprint.compute(
+            basis = basis,
+            intrinsics = FrameIntrinsics.fromFieldOfView(
+                1000, 1000, 60f, 60f,
+                radial = doubleArrayOf(-2.5e-7, 0.0, 0.0),
+            ),
+            canvasWidth = 3600,
+            canvasHeight = 1800,
+            marginPx = 0,
+        )
+
+        // A barrel-distorted frame sees past the pinhole's field of view at its
+        // edges, so its footprint must reach further — a footprint that shrank
+        // here would be a missed edge in the stitch.
+        assertTrue(
+            "barrel span ${barrel.columnSpan} should exceed pinhole ${plain.columnSpan}",
+            barrel.columnSpan > plain.columnSpan,
+        )
+    }
+
     @Test(expected = IllegalArgumentException::class)
     fun `an impossible field of view is rejected rather than warped around`() {
         FrameIntrinsics.fromFieldOfView(1000, 1000, 180f, 60f)
