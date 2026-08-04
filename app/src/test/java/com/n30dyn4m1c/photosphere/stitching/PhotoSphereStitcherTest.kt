@@ -1,6 +1,8 @@
 package com.n30dyn4m1c.photosphere.stitching
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -82,6 +84,32 @@ class PhotoSphereStitcherTest {
             assertTrue("$sample is not a power of two", sample > 0 && sample and (sample - 1) == 0)
             assertTrue("long edge still over the limit", width / sample <= 1024)
         }
+    }
+
+    @Test
+    fun `a field of view that matches the frame is left alone`() {
+        // Portrait 4:3 frame with the portrait screen FOV.
+        assertNull(PhotoSphereStitcher.correctFovOrientation(750, 1000, 52f, 66f))
+        // Landscape 4:3 frame with the landscape FOV.
+        assertNull(PhotoSphereStitcher.correctFovOrientation(1000, 750, 66f, 52f))
+    }
+
+    @Test
+    fun `a transposed field of view is swapped back`() {
+        // The axes describe the sensor when the frame is the display's (or the
+        // reverse); the stitcher must not let a frame believe it spans the
+        // wrong angle.
+        val corrected = PhotoSphereStitcher.correctFovOrientation(750, 1000, 66f, 52f)
+        assertNotNull(corrected)
+        assertEquals(52f, corrected!!.first, 1e-3f)
+        assertEquals(66f, corrected.second, 1e-3f)
+    }
+
+    @Test
+    fun `a loosely estimated field of view is not touched`() {
+        // 10% error on a real lens still implies near-square pixels; only a
+        // genuine transposition (the square of the aspect ratio) trips the swap.
+        assertNull(PhotoSphereStitcher.correctFovOrientation(750, 1000, 52f * 1.1f, 66f * 0.95f))
     }
 
     @Test

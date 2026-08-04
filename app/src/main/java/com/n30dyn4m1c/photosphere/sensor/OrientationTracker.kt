@@ -13,6 +13,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlin.math.asin
+import kotlin.math.atan2
+import kotlin.math.cos
+import kotlin.math.sin
 
 private const val TAG = "OrientationTracker"
 
@@ -185,7 +189,6 @@ class OrientationTracker(
     private val rotationVectorValues = FloatArray(ROTATION_VECTOR_SIZE)
     private val rotationMatrix = FloatArray(MATRIX_SIZE)
     private val displayMatrix = FloatArray(MATRIX_SIZE)
-    private val cameraMatrix = FloatArray(MATRIX_SIZE)
     private val anglesRadians = FloatArray(3)
 
     @Volatile
@@ -269,16 +272,21 @@ class OrientationTracker(
         // frame (X east, Y north, Z up).
         SensorManager.getRotationMatrixFromVector(rotationMatrix, values)
 
-        val matrix = remapForDisplay(rotationMatrix) ?: return
-        SensorManager.getOrientation(matrix, anglesRadians)
+        val angles = when (reference) {
+            OrientationReference.Screen ->
+                screenAnglesDegrees(rotationMatrix) ?: return
+            OrientationReference.Camera ->
+                cameraAnglesDegrees(rotationMatrix, displayRotation, anglesRadians)
+        }
 
-        // getOrientation returns azimuth/pitch/roll about the -Z/X/Y axes.
-        // Pitch comes from an asin and is already bounded to ±90°; the other two
-        // come from atan2 and are normalised defensively.
+        // getOrientation's screen frame reports azimuth/pitch/roll about the
+        // -Z/X/Y axes; the camera frame is read straight off the matrix instead.
+        // Yaw and roll come from atan2 and are normalised defensively; pitch
+        // comes from an asin and is already bounded to ±90°.
         _orientation.value = OrientationData(
-            yawDegrees = normalizeDegrees(anglesRadians[0].toDegrees()),
-            pitchDegrees = anglesRadians[1].toDegrees(),
-            rollDegrees = normalizeDegrees(anglesRadians[2].toDegrees()),
+            yawDegrees = angles[0],
+            pitchDegrees = angles[1],
+            rollDegrees = angles[2],
             accuracy = accuracy,
             timestampNanos = event.timestamp,
         )
@@ -288,47 +296,32 @@ class OrientationTracker(
      * Rotates [source] out of the chassis frame and into the frame the angles
      * are reported in, writing into one of the scratch buffers.
      *
-     * Two remaps can apply, and they compose because every display remap is a
-     * rotation about the device's Z axis, which leaves the camera axis (-Z)
-     * alone:
+     * Only the [OrientationReference.Screen] path uses this: the display remap
+     * plus a plain `getOrientation` *is* Android's own convention. The camera
+     * reference is read straight off the device→world matrix instead — see
+     * [cameraAnglesDegrees], which is the inverse of the axis construction the
+     * capture and stitching code build their bases from.
      *
-     * 1. **Display rotation.** Portrait and landscape put the chassis X/Y axes
-     *    in different places on screen; without this, tilting a landscape phone
-     *    "up" would show up as roll.
-     * 2. **Camera reference** ([OrientationReference.Camera]). Maps the device's
-     *    Y axis onto the world Z axis, which is the standard way of telling
-     *    `getOrientation` that the device is held upright rather than lying
-     *    flat. Afterwards yaw/pitch describe the camera's aim.
+     * The display remap rotates the chassis frame so the angles describe the
+     * display the user is actually looking at: portrait and landscape put the
+     * chassis X/Y axes in different places on screen, and without it, tilting a
+     * landscape phone "up" would show up as roll.
      *
      * @return the matrix to read angles from, or null if a remap was rejected —
      *   which should not happen for these fixed axis pairs, but a bad matrix is
      *   worse than a skipped frame.
      */
-    private fun remapForDisplay(source: FloatArray): FloatArray? {
+    private fun screenAnglesDegrees(source: FloatArray): FloatArray? {
         val axes = DisplayAxes.forDisplayRotation(displayRotation)
         if (!SensorManager.remapCoordinateSystem(source, axes.axisX, axes.axisY, displayMatrix)) {
             Log.w(TAG, "Display remap rejected for rotation $displayRotation")
             return null
         }
-
-        if (reference == OrientationReference.Screen) return displayMatrix
-
-        // AXIS_X / AXIS_Z: keep X where it is, send the screen's up axis to the
-        // world's up axis. The device's -Z (the rear camera's line of sight)
-        // then takes the role that "top edge of a flat phone" has by default.
-        // Note the separate output buffer — remapCoordinateSystem may not write
-        // into its own input.
-        if (!SensorManager.remapCoordinateSystem(
-                displayMatrix,
-                SensorManager.AXIS_X,
-                SensorManager.AXIS_Z,
-                cameraMatrix,
-            )
-        ) {
-            Log.w(TAG, "Camera-reference remap rejected")
-            return null
-        }
-        return cameraMatrix
+        SensorManager.getOrientation(displayMatrix, anglesRadians)
+        anglesRadians[0] = normalizeDegrees(anglesRadians[0].toDegrees())
+        anglesRadians[1] = anglesRadians[1].toDegrees()
+        anglesRadians[2] = normalizeDegrees(anglesRadians[2].toDegrees())
+        return anglesRadians
     }
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {
@@ -374,4 +367,97 @@ internal fun normalizeDegrees(degrees: Float): Float {
     if (value >= 180f) value -= 360f
     if (value < -180f) value += 360f
     return value
+}
+
+/**
+ * The rear camera's yaw/pitch/roll in this app's conventions, read straight off
+ * the device→world rotation matrix [deviceToWorld].
+ *
+ * This is the *inverse* of the axis construction `SphereProjection` and
+ * `CameraBasis.of` use: those build a camera basis from a yaw/pitch/roll, and
+ * this recovers the angles from the sensor's matrix so that both halves of the
+ * pipeline describe the same frame. It has to be an exact inverse, or every
+ * frame lands on the sphere rotated — which is exactly the kind of "aligned but
+ * all at odd angles" failure that no amount of stitching can rescue.
+ *
+ * The angles are read from the geometry directly rather than through
+ * `getOrientation`'s azimuth/pitch/roll (which describe a flat screen, not a
+ * camera, and are what a `remapCoordinateSystem` shortcut gets wrong):
+ *
+ * - **forward** is where the lens points: the device's -Z axis in world. Yaw is
+ *   its compass bearing, elevation its height above the horizon (pitch is
+ *   negated to match the app's "negative is up" convention).
+ * - **up** is the top of the captured, display-upright image — the device axis
+ *   that the current display rotation points at the sky. Roll is the angle
+ *   between that up and the unrolled-up for the same yaw/elevation.
+ *
+ * [displayRotation] decides which device axis is the image's up/right, so the
+ * angles describe the camera rather than the chassis and a phone turned
+ * landscape keeps reporting where it is pointing.
+ *
+ * The result is written into [out] (a scratch buffer) to keep a 50 Hz stream
+ * allocation-free.
+ */
+internal fun cameraAnglesDegrees(
+    deviceToWorld: FloatArray,
+    displayRotation: Int,
+    out: FloatArray,
+): FloatArray {
+    // The matrix is row-major with the device axes as its columns: column c is
+    // the world coordinates of device axis c, so the camera looks along -Z.
+    val fx = -deviceToWorld[2].toDouble()
+    val fy = -deviceToWorld[5].toDouble()
+    val fz = -deviceToWorld[8].toDouble()
+
+    // Image right/up in world, mapped from whichever device axes the display
+    // rotation points to the right and the top of the screen.
+    val rx: Double
+    val ry: Double
+    val rz: Double
+    val ux: Double
+    val uy: Double
+    val uz: Double
+    when (displayRotation) {
+        Surface.ROTATION_90 -> {
+            rx = deviceToWorld[1].toDouble(); ry = deviceToWorld[4].toDouble(); rz = deviceToWorld[7].toDouble()
+            ux = -deviceToWorld[0].toDouble(); uy = -deviceToWorld[3].toDouble(); uz = -deviceToWorld[6].toDouble()
+        }
+        Surface.ROTATION_180 -> {
+            rx = -deviceToWorld[0].toDouble(); ry = -deviceToWorld[3].toDouble(); rz = -deviceToWorld[6].toDouble()
+            ux = -deviceToWorld[1].toDouble(); uy = -deviceToWorld[4].toDouble(); uz = -deviceToWorld[7].toDouble()
+        }
+        Surface.ROTATION_270 -> {
+            rx = -deviceToWorld[1].toDouble(); ry = -deviceToWorld[4].toDouble(); rz = -deviceToWorld[7].toDouble()
+            ux = deviceToWorld[0].toDouble(); uy = deviceToWorld[3].toDouble(); uz = deviceToWorld[6].toDouble()
+        }
+        else -> {
+            rx = deviceToWorld[0].toDouble(); ry = deviceToWorld[3].toDouble(); rz = deviceToWorld[6].toDouble()
+            ux = deviceToWorld[1].toDouble(); uy = deviceToWorld[4].toDouble(); uz = deviceToWorld[7].toDouble()
+        }
+    }
+
+    val yaw = Math.toDegrees(atan2(fx, fy)).toFloat()
+    val elevation = asin(fz.coerceIn(-1.0, 1.0))
+    val pitch = -Math.toDegrees(elevation).toFloat()
+
+    // The unrolled pair `CameraBasis.of` would build for this yaw/elevation,
+    // measured against the actual up to recover the roll (see its `toPose`).
+    val yawRad = Math.toRadians(yaw.toDouble())
+    val sinYaw = sin(yawRad)
+    val cosYaw = cos(yawRad)
+    val sinElevation = sin(elevation)
+    val cosElevation = cos(elevation)
+    val up0X = -sinYaw * sinElevation
+    val up0Y = -cosYaw * sinElevation
+    val up0Z = cosElevation
+    val right0X = cosYaw
+    val right0Y = -sinYaw
+    val sinRoll = -(rx * up0X + ry * up0Y + rz * up0Z)
+    val cosRoll = ux * up0X + uy * up0Y + uz * up0Z
+    val roll = Math.toDegrees(atan2(sinRoll, cosRoll)).toFloat()
+
+    out[0] = normalizeDegrees(yaw)
+    out[1] = pitch
+    out[2] = normalizeDegrees(roll)
+    return out
 }

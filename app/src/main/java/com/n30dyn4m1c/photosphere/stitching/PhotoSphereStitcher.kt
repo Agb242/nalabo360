@@ -20,6 +20,7 @@ import org.opencv.core.Size
 import org.opencv.imgproc.Imgproc
 import java.io.File
 import kotlin.math.roundToInt
+import kotlin.math.tan
 
 private const val TAG = "PhotoSphereStitcher"
 
@@ -288,23 +289,52 @@ object PhotoSphereStitcher {
             // of that is as wide as the sphere can be without inventing pixels.
             var canvasWidth = maxOutputWidth
 
+            // The field of view describes the *upright* frame, as captured on
+            // the portrait-locked display. It is checked once, against the first
+            // decoded frame, and swapped if it evidently describes the other
+            // axis instead: a swapped FOV makes the focal lengths the frame
+            // implies disagree by roughly the square of its aspect ratio, which
+            // no real lens does. See [correctFovOrientation].
+            var horizontalFov = horizontalFovDegrees
+            var verticalFov = verticalFovDegrees
+            var fovChecked = false
+
             frames.forEachIndexed { position, frame ->
                 ensureActive()
                 onProgress(StitchProgress(StitchStage.Reading, position, frames.size))
 
                 val image = readFrame(frame.file, maxInputDimension)
                 val longest = maxOf(image.cols(), image.rows())
+                if (!fovChecked) {
+                    val corrected = correctFovOrientation(
+                        widthPx = image.cols(),
+                        heightPx = image.rows(),
+                        horizontalFovDegrees = horizontalFov,
+                        verticalFovDegrees = verticalFov,
+                    )
+                    if (corrected != null) {
+                        Log.w(
+                            TAG,
+                            "FOV ${horizontalFov}°x${verticalFov}° does not match the " +
+                                "${image.cols()}x${image.rows()} frame; using " +
+                                "${corrected.first}°x${corrected.second}°",
+                        )
+                        horizontalFov = corrected.first
+                        verticalFov = corrected.second
+                    }
+                    fovChecked = true
+                }
                 val intrinsics = FrameIntrinsics.fromFieldOfView(
                     widthPx = image.cols(),
                     heightPx = image.rows(),
-                    horizontalFovDegrees = horizontalFovDegrees,
-                    verticalFovDegrees = verticalFovDegrees,
+                    horizontalFovDegrees = horizontalFov,
+                    verticalFovDegrees = verticalFov,
                     radial = radialDistortion?.effectiveFor(longest),
                 )
                 if (position == 0) {
                     canvasWidth = canvasWidthFor(
                         frameWidthPx = image.cols(),
-                        horizontalFovDegrees = horizontalFovDegrees,
+                        horizontalFovDegrees = horizontalFov,
                         maxOutputWidth = maxOutputWidth,
                     )
                 }
@@ -426,6 +456,41 @@ object PhotoSphereStitcher {
         val ideal = (360.0 * frameWidthPx / horizontalFovDegrees).roundToInt()
         val width = minOf(ideal, maxOutputWidth).coerceAtLeast(MIN_OUTPUT_WIDTH)
         return width - (width % 2)
+    }
+
+    /**
+     * Checks that the two field-of-view angles describe the axes of a decoded
+     * [widthPx]x[heightPx] frame, swapping them when they evidently do not.
+     *
+     * A lens has square pixels, so the focal length the horizontal field of
+     * view implies for the frame's width must match the one the vertical field
+     * of view implies for its height. If the angles arrived transposed — the
+     * axes of the sensor rather than of the upright frame — the two implied
+     * focal lengths differ by roughly the square of the aspect ratio (0.56 for
+     * a 4:3 frame), which is far beyond any field-of-view estimation error. The
+     * boundary is drawn at 1 ± 30%: generous enough never to trip on a
+     * loosely-described lens, unambiguous enough that a genuine swap is caught.
+     *
+     * Returns the corrected pair, or null when the angles already match the
+     * frame.
+     */
+    internal fun correctFovOrientation(
+        widthPx: Int,
+        heightPx: Int,
+        horizontalFovDegrees: Float,
+        verticalFovDegrees: Float,
+    ): Pair<Float, Float>? {
+        if (widthPx <= 0 || heightPx <= 0) return null
+        val horizontalTan = tan(Math.toRadians(horizontalFovDegrees / 2.0))
+        val verticalTan = tan(Math.toRadians(verticalFovDegrees / 2.0))
+        if (horizontalTan <= 0.0 || verticalTan <= 0.0) return null
+        val horizontalFocal = widthPx / 2.0 / horizontalTan
+        val verticalFocal = heightPx / 2.0 / verticalTan
+        val ratio =
+            if (horizontalFocal >= verticalFocal) verticalFocal / horizontalFocal
+            else horizontalFocal / verticalFocal
+        if (ratio >= 0.7) return null
+        return verticalFovDegrees to horizontalFovDegrees
     }
 
     /**

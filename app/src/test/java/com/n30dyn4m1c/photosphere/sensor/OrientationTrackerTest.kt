@@ -2,6 +2,8 @@ package com.n30dyn4m1c.photosphere.sensor
 
 import android.hardware.SensorManager
 import android.view.Surface
+import com.n30dyn4m1c.photosphere.stitching.CameraBasis
+import com.n30dyn4m1c.photosphere.stitching.CameraPose
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -105,6 +107,124 @@ class OrientationTrackerTest {
     fun `the default sample has no fix`() {
         assertFalse(OrientationData().hasFix)
         assertTrue(OrientationData(timestampNanos = 1L).hasFix)
+    }
+
+    @Test
+    fun `camera angles round-trip through a device matrix`() {
+        // `cameraAnglesDegrees` is the inverse of the axis construction
+        // `CameraBasis.of` performs, so feeding it the matrix a phone with that
+        // basis would produce must hand the same angles back — or every frame
+        // lands on the sphere rotated.
+        for (yaw in -150..150 step 30) {
+            for (pitch in -60..60 step 20) {
+                for (roll in -120..120 step 40) {
+                    for (display in listOf(
+                        Surface.ROTATION_0,
+                        Surface.ROTATION_90,
+                        Surface.ROTATION_180,
+                        Surface.ROTATION_270,
+                    )) {
+                        val label = "yaw $yaw pitch $pitch roll $roll display $display"
+                        val basis = CameraBasis.of(
+                            CameraPose(yaw.toFloat(), pitch.toFloat(), roll.toFloat())
+                        )
+                        val out = FloatArray(3)
+                        cameraAnglesDegrees(deviceMatrix(basis, display), display, out)
+                        assertEquals("$label: yaw", yaw.toFloat(), out[0], 1e-3f)
+                        assertEquals("$label: pitch", pitch.toFloat(), out[1], 1e-3f)
+                        assertEquals("$label: roll", roll.toFloat(), out[2], 1e-3f)
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `a level pan reads as yaw, not roll`() {
+        // The regression this file exists for: the camera-reference angles used
+        // to report a level pan as *roll* and kept yaw pinned near zero, so the
+        // stitcher placed every frame of a ring onto the same longitude, each
+        // one rotated differently — the "aligned but at odd angles" failure.
+        for (heading in listOf(0f, 30f, 60f, 90f, -45f, 170f)) {
+            val basis = CameraBasis.of(CameraPose(heading, 0f, 0f))
+            val out = FloatArray(3)
+            cameraAnglesDegrees(deviceMatrix(basis, Surface.ROTATION_0), Surface.ROTATION_0, out)
+            assertEquals("yaw for heading $heading", heading, out[0], 1e-3f)
+            assertEquals("roll for heading $heading", 0f, out[2], 1e-3f)
+        }
+    }
+
+    @Test
+    fun `a roll of the phone reads as roll, not yaw`() {
+        for (roll in listOf(0f, 30f, 90f, -45f)) {
+            val basis = CameraBasis.of(CameraPose(0f, 0f, roll))
+            val out = FloatArray(3)
+            cameraAnglesDegrees(deviceMatrix(basis, Surface.ROTATION_0), Surface.ROTATION_0, out)
+            assertEquals("roll $roll", roll, out[2], 1e-3f)
+            assertEquals("yaw for roll $roll", 0f, out[0], 1e-3f)
+        }
+    }
+
+    @Test
+    fun `negative pitch is aimed above the horizon`() {
+        val basis = CameraBasis.of(CameraPose(0f, -30f, 0f))
+        val out = FloatArray(3)
+        cameraAnglesDegrees(deviceMatrix(basis, Surface.ROTATION_0), Surface.ROTATION_0, out)
+        assertEquals("aimed up is negative pitch", -30f, out[1], 1e-3f)
+    }
+
+    @Test
+    fun `yaw and roll wrap onto the half-open range`() {
+        // The camera looks at the pole of the compass — a heading that could be
+        // ±180 — and the extraction has to pick one side.
+        val basis = CameraBasis.of(CameraPose(180f, 0f, 0f))
+        val out = FloatArray(3)
+        cameraAnglesDegrees(deviceMatrix(basis, Surface.ROTATION_0), Surface.ROTATION_0, out)
+        assertTrue("yaw ${out[0]} should sit in [-180, 180)", out[0] in -180f..180f)
+        assertTrue(out[0] != 180f || out[0] == -180f)
+    }
+
+    private fun deviceMatrix(basis: CameraBasis, displayRotation: Int): FloatArray {
+        // Build the device->world matrix a real phone with this camera basis
+        // would report, given how the display rotation remaps which chassis axis
+        // is the image's right/up.
+        val right = doubleArrayOf(basis.rightX, basis.rightY, basis.rightZ)
+        val up = doubleArrayOf(basis.upX, basis.upY, basis.upZ)
+        val forward = doubleArrayOf(basis.forwardX, basis.forwardY, basis.forwardZ)
+        fun neg(v: DoubleArray) = doubleArrayOf(-v[0], -v[1], -v[2])
+
+        val devX: DoubleArray
+        val devY: DoubleArray
+        when (displayRotation) {
+            Surface.ROTATION_90 -> {
+                devX = neg(up)
+                devY = right
+            }
+            Surface.ROTATION_180 -> {
+                devX = neg(right)
+                devY = neg(up)
+            }
+            Surface.ROTATION_270 -> {
+                devX = up
+                devY = neg(right)
+            }
+            else -> {
+                devX = right
+                devY = up
+            }
+        }
+        val devZ = neg(forward)
+
+        fun put(v: DoubleArray, column: Int, out: FloatArray) {
+            out[column] = v[0].toFloat()
+            out[3 + column] = v[1].toFloat()
+            out[6 + column] = v[2].toFloat()
+        }
+        return FloatArray(9).also {
+            put(devX, 0, it)
+            put(devY, 1, it)
+            put(devZ, 2, it)
+        }
     }
 
     private companion object {

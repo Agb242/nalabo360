@@ -460,6 +460,48 @@ class SphericalGeometryTest {
         )
     }
 
+    @Test
+    fun `overlapping aims are found by the pose graph`() {
+        // Two level frames 20° apart on a portrait lens (52° wide, 66° tall):
+        // well inside the shared view, so the edge is measured.
+        val a = CameraBasis.of(CameraPose(0f, 0f, 0f))
+        val b = CameraBasis.of(CameraPose(20f, 0f, 0f))
+        assertNotNull(angularOverlap(a, b, horizontalFovDegrees = 52f, verticalFovDegrees = 66f))
+        // Vertical separation is judged against the taller axis.
+        val above = CameraBasis.of(CameraPose(0f, pitchDegrees = -30f, 0f))
+        assertNotNull(angularOverlap(a, above, horizontalFovDegrees = 52f, verticalFovDegrees = 66f))
+    }
+
+    @Test
+    fun `aims past a full field of view do not overlap`() {
+        val a = CameraBasis.of(CameraPose(0f, 0f, 0f))
+        val beyond = CameraBasis.of(CameraPose(60f, 0f, 0f))
+        assertNull(angularOverlap(a, beyond, horizontalFovDegrees = 52f, verticalFovDegrees = 66f))
+    }
+
+    @Test
+    fun `the overlap test is directional, not a distance ballpark`() {
+        val a = CameraBasis.of(CameraPose(0f, 0f, 0f))
+        // 55° of aim difference, all of it horizontal: on a 52°-wide portrait
+        // frame the images cannot share a pixel, so the edge is rejected even
+        // though a single distance threshold (the old "widest FOV" rule) would
+        // have accepted it.
+        val farSideways = CameraBasis.of(CameraPose(55f, 0f, 0f))
+        assertNull(angularOverlap(a, farSideways, horizontalFovDegrees = 52f, verticalFovDegrees = 66f))
+        // The same 55° of aim difference, split across both axes, still
+        // overlaps on the tall axis.
+        val upAndAcross = CameraBasis.of(CameraPose(35f, -40f, 0f))
+        assertNotNull(angularOverlap(a, upAndAcross, horizontalFovDegrees = 52f, verticalFovDegrees = 66f))
+    }
+
+    @Test
+    fun `closer aims report a stronger overlap`() {
+        val a = CameraBasis.of(CameraPose(0f, 0f, 0f))
+        val near = angularOverlap(a, CameraBasis.of(CameraPose(10f, 0f, 0f)), 52f, 66f)!!
+        val far = angularOverlap(a, CameraBasis.of(CameraPose(30f, 0f, 0f)), 52f, 66f)!!
+        assertTrue("near $near should be smaller than far $far", near < far)
+    }
+
     @Test(expected = IllegalArgumentException::class)
     fun `an impossible field of view is rejected rather than warped around`() {
         FrameIntrinsics.fromFieldOfView(1000, 1000, 180f, 60f)

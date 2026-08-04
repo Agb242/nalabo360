@@ -213,26 +213,43 @@ listens to `TYPE_ROTATION_VECTOR` — the *fused* sensor, so the attitude is
 absolute, north-referenced and drift-free — and publishes it as a
 `StateFlow<OrientationData>` of yaw, pitch and roll in degrees.
 
-Each event is converted with `getRotationMatrixFromVector`, then run through
-`remapCoordinateSystem` before the angles are read out:
+The angles are read straight off the device→world rotation matrix, so they
+describe **where the rear camera points**, not the screen:
 
-1. **Display rotation.** The sensor frame is bolted to the chassis, so the matrix
-   is rotated into the frame the user is actually looking at. Without it, tilting
-   a landscape phone upwards would register as roll.
-2. **Reference frame.** `OrientationReference.Screen` gives Android's own
-   convention, where "level" means the screen lying flat and face up. That is
-   the wrong pose for this app: holding the phone upright to shoot the horizon
-   parks it at pitch ≈ -90°, which is exactly the gimbal-lock singularity where
-   yaw and roll collapse into each other. The default
-   `OrientationReference.Camera` adds an `AXIS_X`/`AXIS_Z` remap so the angles
-   describe **where the rear camera points** — yaw is the bearing of the frame
-   being captured, pitch is 0° at the horizon — and the singularity moves to
-   straight up/down. The two remaps compose safely: every display remap is a
-   rotation about the device Z axis, which leaves the camera axis (-Z) alone.
+1. **The camera basis.** `getRotationMatrixFromVector` gives the matrix mapping
+   device axes to the world frame (X east, Y north, Z up). The lens looks along
+   the device's -Z axis, so that is the camera's forward. Yaw is its compass
+   bearing, elevation its height above the horizon (reported as a pitch that is
+   **negative above the horizon**, matching the capture plan and the stitcher),
+   and roll is the image's tilt about the forward axis.
+2. **Display rotation.** Which chassis axis counts as the image's "up" depends
+   on how the display is turned, so the tracker maps the display rotation onto
+   the device axis that points at the top of the screen and measures the roll
+   against it. Portrait and landscape then both report the same absolute
+   attitude — turning a landscape phone "up" reads as pitch, never as roll.
 
-Angle ranges follow `SensorManager.getOrientation`: yaw and roll are
-`atan2`-derived and span -180°..180°, pitch is `asin`-derived and spans
--90°..90°. Pitch is **negative when the camera is aimed above the horizon**.
+This extraction is the *inverse* of the axis construction
+[`SphereProjection`](app/src/main/java/com/n30dyn4m1c/photosphere/camera/SphereProjection.kt)
+and [`CameraBasis`](app/src/main/java/com/n30dyn4m1c/photosphere/stitching/SphericalGeometry.kt)
+build their camera bases with, so a yaw/pitch/roll handed to the stitcher places
+a frame exactly where the sensor held the camera. (It used to go through a
+`remapCoordinateSystem` + `getOrientation` shortcut that reported a level pan as
+*roll* and pinned yaw near zero; every frame of a ring then landed on the same
+longitude, each rotated differently — the "aligned but at odd angles" failure —
+so it is pinned down by unit tests against `CameraBasis` now.)
+
+The ranges follow the camera-basis construction: yaw and roll are `atan2`-derived
+and span -180°..180°, pitch is `asin`-derived and spans -90°..90°. Pitch is
+**negative when the camera is aimed above the horizon**.
+
+One orientation per session. `MainActivity` is locked to portrait in the
+manifest, so the display rotation cannot change mid-run. That matters beyond
+convenience: the target plan, the sensor's angles and each frame's EXIF
+orientation all describe the same display rotation, and a run that crossed a
+rotation would carry frames in two incompatible conventions — nothing would
+stitch them. The tracker still reads the display rotation properly (the angles
+are correct for any rotation), but with the screen locked it is constant for
+the whole session.
 
 Events are delivered on a private `HandlerThread`, so a high sampling rate never
 competes with the UI. The tracker holds an OS listener registration and must be
@@ -418,6 +435,12 @@ reprojection, but the measured poses are not the last word:
   should be near, and a frame whose content gives no reliable matches keeps its
   measured pose, so a featureless sky or a blank wall degrades gracefully to the
   orientation-driven stitch rather than a failed one.
+- Which pairs count as overlapping is a *directional* test rather than a single
+  distance threshold: the second frame's aim is projected into the first's
+  camera frame and must land within one field of view on both axes. A portrait
+  frame is far taller than it is wide, so two aims 55° apart can overlap
+  vertically but not at all horizontally — a distance-only rule would waste a
+  match on them.
 - The lens's radial distortion is carried through the whole model. The camera's
   `LENS_DISTORTION` coefficients ([`RadialDistortion`](app/src/main/java/com/n30dyn4m1c/photosphere/stitching/LensModel.kt))
   describe how the lens bends the pinhole projection, so the renderer samples
@@ -490,6 +513,15 @@ accumulated exists in float and the peak is a few megabytes. The canvas is also
 never rendered wider than the frames justify — a 1024 px frame across 66° carries
 about 15.5 px per degree, so a full turn is worth ~5600 px, and rendering beyond
 that would only interpolate.
+
+**The field of view is self-checked.** The angles handed to the stitcher describe
+the upright frame as captured on the portrait-locked display, and `stitchPhotos`
+verifies them against the first decoded frame: a lens has square pixels, so if
+the horizontal and vertical angles imply focal lengths that disagree by more
+than a real lens could, the pair is swapped and a warning is logged. It is a
+safety net for the one mis-description that would silently bend every frame out
+of shape — there is no error message that would rescue a run whose frames were
+all projected through the wrong axis.
 
 Failures come back as a failed `Result` carrying a `StitchException` with a
 `StitchStatus`: too little of the sphere covered, a frame that would not decode,

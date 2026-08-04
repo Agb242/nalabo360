@@ -8,9 +8,10 @@ import org.opencv.core.Size
 import org.opencv.features2d.DescriptorMatcher
 import org.opencv.features2d.ORB
 import org.opencv.imgproc.Imgproc
-import kotlin.math.acos
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.roundToInt
+import kotlin.math.tan
 import kotlin.random.Random
 
 /**
@@ -85,9 +86,6 @@ internal object PoseRefiner {
     /** How many neighbours each frame is allowed to measure. */
     const val MAX_EDGES_PER_FRAME = 5
 
-    /** Frames closer than this angular fraction of the widest FOV overlap. */
-    private const val EDGE_FOV_FRACTION = 0.9f
-
     /**
      * An edge whose rotation lands further than this from the sensor's relative
      * rotation is assumed to be a false match on repetitive texture, not a lens
@@ -105,8 +103,7 @@ internal object PoseRefiner {
         pivotRatio: Double = 0.0,
         onProgress: (completed: Int, total: Int) -> Unit = { _, _ -> },
     ): RefinementResult {
-        val widest = max(horizontalFovDegrees, verticalFovDegrees)
-        val candidateEdges = overlapGraph(frames, widest)
+        val candidateEdges = overlapGraph(frames, horizontalFovDegrees, verticalFovDegrees)
 
         val orb = ORB.create(
             ORB_MAX_FEATURES, 1.2f, 8, 31, 0, 2, ORB.HARRIS_SCORE, 31, 20,
@@ -308,21 +305,33 @@ internal object PoseRefiner {
     }
 
     /**
-     * The pose graph: pairs of frames whose aims are close enough that their
-     * images genuinely overlap, capped at [MAX_EDGES_PER_FRAME] per frame and
-     * ordered by how much they overlap so the strongest edges are measured first.
+     * The pose graph: pairs of frames whose images genuinely overlap, capped at
+     * [MAX_EDGES_PER_FRAME] per frame and ordered by how much they overlap so
+     * the strongest edges are measured first.
+     *
+     * A pair is a candidate only when [angularOverlap] says its aims fall
+     * within one field of view of each other on *both* axes — a directional
+     * test, rather than a single angular-distance threshold, because a portrait
+     * frame is far taller than it is wide: two aims 55° apart overlap
+     * vertically but not at all horizontally, and a distance-only threshold
+     * would waste a match on them.
      */
     private fun overlapGraph(
         frames: List<DecodedFrame>,
-        widestFovDegrees: Float,
+        horizontalFovDegrees: Float,
+        verticalFovDegrees: Float,
     ): List<Pair<Int, Int>> {
         val n = frames.size
-        val thresholdRadians = Math.toRadians(widestFovDegrees * EDGE_FOV_FRACTION.toDouble())
         val candidates = ArrayList<Triple<Double, Int, Int>>()
         for (i in 0 until n) {
             for (j in i + 1 until n) {
-                val distance = angularDistance(frames[i].sensorBasis, frames[j].sensorBasis)
-                if (distance <= thresholdRadians) candidates += Triple(distance, i, j)
+                val overlap = angularOverlap(
+                    a = frames[i].sensorBasis,
+                    b = frames[j].sensorBasis,
+                    horizontalFovDegrees = horizontalFovDegrees,
+                    verticalFovDegrees = verticalFovDegrees,
+                )
+                if (overlap != null) candidates += Triple(overlap, i, j)
             }
         }
         candidates.sortBy { it.first }
@@ -337,11 +346,31 @@ internal object PoseRefiner {
         return edges
     }
 
-    /** Angle between two cameras' aim directions, in radians. */
-    private fun angularDistance(a: CameraBasis, b: CameraBasis): Double {
-        val dot = a.forwardX * b.forwardX + a.forwardY * b.forwardY + a.forwardZ * b.forwardZ
-        return acos(dot.coerceIn(-1.0, 1.0))
-    }
-
     private fun seedFor(a: Int, b: Int): Long = (a.toLong() * 31 + b.toLong() * 17) and 0x7fffffffL
+}
+
+/**
+ * How much two aims overlap, or null when they do not.
+ *
+ * The second camera's aim is projected into the first's camera frame and must
+ * land within one field of view on both axes — the condition for two
+ * axis-aligned field-of-view windows to intersect. The returned value is the
+ * squared angular separation (tangent-space), so a smaller value is a stronger
+ * shared view, which is how the pose graph orders its edges.
+ */
+internal fun angularOverlap(
+    a: CameraBasis,
+    b: CameraBasis,
+    horizontalFovDegrees: Float,
+    verticalFovDegrees: Float,
+): Double? {
+    val lateral = a.lateralOf(b.forwardX, b.forwardY, b.forwardZ)
+    val vertical = a.verticalOf(b.forwardX, b.forwardY, b.forwardZ)
+    val depth = a.depthOf(b.forwardX, b.forwardY, b.forwardZ)
+    if (depth <= MIN_DEPTH) return null
+    val horizontalSeparation = abs(lateral / depth)
+    val verticalSeparation = abs(vertical / depth)
+    if (horizontalSeparation >= tan(Math.toRadians(horizontalFovDegrees.toDouble()))) return null
+    if (verticalSeparation >= tan(Math.toRadians(verticalFovDegrees.toDouble()))) return null
+    return horizontalSeparation * horizontalSeparation + verticalSeparation * verticalSeparation
 }
