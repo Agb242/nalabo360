@@ -1,6 +1,11 @@
 # Photo Sphere
 
-Android app scaffold for capturing and stitching 360° photo spheres.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Android](https://img.shields.io/badge/Platform-Android-green.svg)](https://www.android.com/)
+[![Kotlin](https://img.shields.io/badge/Language-Kotlin-blue.svg)](https://kotlinlang.org/)
+[![CI](https://github.com/n30dyn4m1c/360-photo-app/actions/workflows/android.yml/badge.svg)](https://github.com/n30dyn4m1c/360-photo-app/actions/workflows/android.yml)
+
+**Android app for guided capture and stitching of 360° photo spheres.**
 
 The app covers **guided capture** — a CameraX viewfinder with a target alignment
 overlay that walks the user around the sphere and fires the shutter by itself
@@ -621,3 +626,7 @@ read grant attached.
   each overlap where the frames agree most and cut there, fading only a few
   pixels across it. The current cross-fade trades a little sharpness for the
   certainty of never exposing a gap.
+
+## License
+
+This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
