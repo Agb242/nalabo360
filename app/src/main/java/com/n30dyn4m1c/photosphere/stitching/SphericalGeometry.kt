@@ -156,16 +156,22 @@ class CameraBasis private constructor(
          * Builds the basis a row-major rotation matrix describes — the inverse
          * of [toRotationMatrix]. [matrix] is expected to be orthonormal and
          * right-handed, as the refinement pipeline produces.
+         *
+         * The vectors live in the matrix's *columns*, matching [toRotationMatrix]:
+         * the storage is `[right, up, forward]` laid out one component-row at a
+         * time, so a column is read at stride 3. Reading the rows instead would
+         * transpose the basis — which for a level frame collapses every forward
+         * onto due north and stacks all the frames of a capture on one longitude.
          */
         fun fromRotationMatrix(matrix: DoubleArray): CameraBasis = CameraBasis(
             rightX = matrix[0],
-            rightY = matrix[1],
-            rightZ = matrix[2],
-            upX = matrix[3],
+            rightY = matrix[3],
+            rightZ = matrix[6],
+            upX = matrix[1],
             upY = matrix[4],
-            upZ = matrix[5],
-            forwardX = matrix[6],
-            forwardY = matrix[7],
+            upZ = matrix[7],
+            forwardX = matrix[2],
+            forwardY = matrix[5],
             forwardZ = matrix[8],
         )
     }

@@ -5,6 +5,7 @@ package com.n30dyn4m1c.photosphere.camera
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.os.Build
 import android.os.SystemClock
 import android.util.Log
 import android.util.Size
@@ -80,8 +81,10 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
+import androidx.exifinterface.media.ExifInterface
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.n30dyn4m1c.photosphere.BuildConfig
 import com.n30dyn4m1c.photosphere.R
 import com.n30dyn4m1c.photosphere.sensor.OrientationAccuracy
 import com.n30dyn4m1c.photosphere.sensor.OrientationData
@@ -111,6 +114,7 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
+import kotlin.math.roundToInt
 
 private const val TAG = "PhotoSphereCamera"
 
@@ -206,6 +210,18 @@ fun PhotoSphereCameraScreen(
     var activeIndex by remember { mutableIntStateOf(0) }
     var isHolding by remember { mutableStateOf(false) }
     var accuracy by remember { mutableStateOf(OrientationAccuracy.Unknown) }
+
+    // Lens model defaults. The sensor poses + pinhole combination is the
+    // reliable core of the stitch; pose refinement can move frames off the
+    // sensor's accurate answer when the scene has parallax (a body-swivel
+    // capture of a close scene breaks the pure-rotation feature model), so it
+    // starts OFF. The debug toggles let the two optional stages be switched
+    // back on to compare.
+    var distortionEnabled by remember { mutableStateOf(false) }
+    var refinementEnabled by remember { mutableStateOf(false) }
+    // Debug: paint each frame a solid colour so the pano shows where each one
+    // was placed — distinguishes a placement bug from a content bug.
+    var colorFrames by remember { mutableStateOf(false) }
 
     /**
      * Runs a focus sweep at a normalised point in the preview and locks the
@@ -562,7 +578,7 @@ fun PhotoSphereCameraScreen(
                     frames = frames,
                     horizontalFovDegrees = fieldOfView.horizontalDegrees,
                     verticalFovDegrees = fieldOfView.verticalDegrees,
-                    radialDistortion = optics.radialDistortion,
+                    radialDistortion = if (distortionEnabled) optics.radialDistortion else null,
                     maxInputDimension = deviceProfile.stitchMaxInputDimension,
                     maxOutputWidth = deviceProfile.stitchMaxOutputWidth,
                     unsharpAmount = deviceProfile.unsharpAmount,
@@ -570,11 +586,25 @@ fun PhotoSphereCameraScreen(
                     // spot, so the lens swings on the end of an arm rather than
                     // sitting on the axis. See PivotModel.
                     pivot = deviceProfile.pivot,
+                    // The turn CameraX records in each still's EXIF; used to put
+                    // a frame back upright when that tag was lost.
+                    portraitRotationDegrees = optics.portraitRotationDegrees,
+                    useRefinement = refinementEnabled,
+                    debugColorFrames = colorFrames,
                 ) { stitchProgress.value = it }
                     .onSuccess { sphere ->
                         val stitched = try {
                             withContext(Dispatchers.IO) {
                                 SphereImageStore.writeStitchedSphere(context, sphere)
+                                    .copy(
+                                        diagnostics = stitchDiagnostics(
+                                            frames,
+                                            fieldOfView,
+                                            optics,
+                                            distortionEnabled,
+                                            refinementEnabled,
+                                        )
+                                    )
                             }
                         } catch (e: CancellationException) {
                             throw e
@@ -713,6 +743,13 @@ fun PhotoSphereCameraScreen(
                     resetGuidance()
                     scope.launch { buffer.cancelSession() }
                 },
+                // Debug A/B for the lens model; hidden in release builds.
+                distortionEnabled = distortionEnabled,
+                onToggleDistortion = { distortionEnabled = !distortionEnabled },
+                refinementEnabled = refinementEnabled,
+                onToggleRefinement = { refinementEnabled = !refinementEnabled },
+                colorFrames = colorFrames,
+                onToggleColorFrames = { colorFrames = !colorFrames },
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(insets),
@@ -741,6 +778,12 @@ private fun CaptureHud(
     canStitch: Boolean,
     onFinish: () -> Unit,
     onRestart: () -> Unit,
+    distortionEnabled: Boolean,
+    onToggleDistortion: () -> Unit,
+    refinementEnabled: Boolean,
+    onToggleRefinement: () -> Unit,
+    colorFrames: Boolean,
+    onToggleColorFrames: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Box(modifier = modifier) {
@@ -785,6 +828,38 @@ private fun CaptureHud(
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             HintCard(text = hint)
+            // Debug-only A/B control for the lens model: a device that reports
+            // LENS_DISTORTION in the wrong convention warps every frame, and
+            // re-stitching the same frames as a pinhole isolates it.
+            if (BuildConfig.DEBUG && canStitch) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    TextButton(onClick = onToggleDistortion) {
+                        Text(
+                            text = "Dist: ${if (distortionEnabled) "on" else "off"}",
+                            color = Color.White.copy(alpha = 0.8f),
+                            style = MaterialTheme.typography.labelMedium,
+                        )
+                    }
+                    TextButton(onClick = onToggleRefinement) {
+                        Text(
+                            text = "Refine: ${if (refinementEnabled) "on" else "off"}",
+                            color = Color.White.copy(alpha = 0.8f),
+                            style = MaterialTheme.typography.labelMedium,
+                        )
+                    }
+                    TextButton(onClick = onToggleColorFrames) {
+                        Text(
+                            text = "Color: ${if (colorFrames) "on" else "off"}",
+                            color = Color.White.copy(alpha = 0.8f),
+                            style = MaterialTheme.typography.labelMedium,
+                        )
+                    }
+                }
+            }
             // Offered as soon as there is enough to stitch, not only at the
             // end: a user who has covered what they care about should not have
             // to walk the remaining targets to get a sphere out of it.
@@ -1212,7 +1287,52 @@ private fun captureHint(
 }
 
 /**
- * Writes one frame to the session's cache directory and buffers it.
+ * Debug-only summary of what a stitch was built from, for the result screen.
+ *
+ * The pose column is what decides whether frames land where they were shot:
+ * yaw should sweep across a capture, pitch should follow the rings, and roll
+ * should stay small when the phone is held level. When a sphere comes out
+ * scrambled this is the first place to look.
+ *
+ * The EXIF column is the other half of the puzzle: the stitch decodes each
+ * JPEG upright via its `ORIENTATION` tag, and a frame that lost that tag
+ * decodes landscape and lands rotated 90° against its pose.
+ */
+private fun stitchDiagnostics(
+    frames: List<SphereFrame>,
+    fieldOfView: FieldOfView,
+    optics: SphereOptics,
+    distortionApplied: Boolean,
+    refinementApplied: Boolean,
+): String {
+    val poses = frames.joinToString(separator = "\n") { frame ->
+        val exif = runCatching {
+            ExifInterface(frame.file).getAttributeInt(
+                ExifInterface.TAG_ORIENTATION,
+                ExifInterface.ORIENTATION_NORMAL,
+            )
+        }.getOrDefault(ExifInterface.ORIENTATION_NORMAL)
+        "  #${frames.indexOf(frame)} yaw ${frame.pose.yawDegrees.roundToInt()}° " +
+            "pitch ${frame.pose.pitchDegrees.roundToInt()}° roll ${frame.pose.rollDegrees.roundToInt()}°" +
+            " exif=$exif"
+    }
+    val device = listOfNotNull(
+        Build.MANUFACTURER,
+        Build.MODEL,
+    ).joinToString(" ")
+    val distortion = optics.radialDistortion
+        ?.coefficients
+        ?.joinToString(prefix = "[", postfix = "]") { "%.4f".format(it) }
+        ?: "none"
+    return "Device: $device\n" +
+        "FOV: ${fieldOfView.horizontalDegrees.roundToInt()}° x " +
+        "${fieldOfView.verticalDegrees.roundToInt()}° (screen) " +
+        "rotation=${optics.portraitRotationDegrees}°\n" +
+        "Distortion k: $distortion ${if (distortionApplied) "applied" else "OFF (pinhole)"}\n" +
+        "Refinement: ${if (refinementApplied) "on" else "off (sensor poses)"}\n" +
+        "Frames (capture order):\n$poses"}
+
+/** Writes one frame to the session's cache directory and buffers it.
  *
  * The device's attitude at the moment of capture goes into the buffer entry and
  * into the file's EXIF: the stitcher gets a free initial guess at where each

@@ -57,6 +57,15 @@ private const val MAX_ESTIMATE_DISAGREEMENT = 1.25f
 data class SphereOptics(
     val fieldOfView: FieldOfView,
     val radialDistortion: RadialDistortion?,
+    /**
+     * Clockwise rotation, in degrees, that turns a raw (sensor-native) frame
+     * into the display-upright portrait frame the [fieldOfView] describes —
+     * the same rotation CameraX records in each still's EXIF `ORIENTATION`
+     * tag. The stitcher uses it as the fallback when a frame's EXIF rotation
+     * is missing or was lost in a metadata rewrite, so the frame still lands
+     * upright against its pose.
+     */
+    val portraitRotationDegrees: Int,
 )
 
 /**
@@ -243,7 +252,14 @@ internal fun estimateSphereOptics(
     val relativeRotation = ((sensorOrientation - displayRotation.toDegrees()) % 360 + 360) % 360
     val fieldOfView =
         if (relativeRotation % 180 == 90) sensorFieldOfView.transposed() else sensorFieldOfView
-    return SphereOptics(fieldOfView = fieldOfView, radialDistortion = radialDistortion)
+    return SphereOptics(
+        fieldOfView = fieldOfView,
+        radialDistortion = radialDistortion,
+        // The rotation CameraX records in each still's EXIF — the clockwise turn
+        // that makes the sensor's native frame display-upright at the current
+        // display rotation. The stitcher's fallback when a frame loses that tag.
+        portraitRotationDegrees = relativeRotation,
+    )
 }
 
 /**

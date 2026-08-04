@@ -395,6 +395,61 @@ class SphericalGeometryTest {
     }
 
     @Test
+    fun `a basis round-trips through its own rotation matrix`() {
+        // The regression this guards: fromRotationMatrix used to read the
+        // matrix's *rows* as the vectors while toRotationMatrix stores them as
+        // columns, so the inverse was actually a transpose. A level frame's
+        // recovered forward collapsed to (0,1,0) whatever its yaw, and every
+        // frame of a capture stacked onto the same longitude.
+        for (yaw in -170..170 step 20) {
+            for (pitch in -60..60 step 20) {
+                for (roll in -160..150 step 40) {
+                    val basis = CameraBasis.of(
+                        CameraPose(yaw.toFloat(), pitch.toFloat(), roll.toFloat())
+                    )
+                    val recovered = CameraBasis.fromRotationMatrix(basis.toRotationMatrix())
+                    assertEquals(
+                        "yaw $yaw pitch $pitch roll $roll: forward",
+                        0.0,
+                        RotationMath.angle(
+                            basis.toRotationMatrix(),
+                            recovered.toRotationMatrix(),
+                        ),
+                        1e-6,
+                    )
+                    // The recovered forward must aim where the yaw says it does.
+                    val pose = recovered.toPose()
+                    assertEquals("yaw $yaw: recovered yaw", yaw.toFloat(), pose.yawDegrees, 1e-3f)
+                    assertEquals("pitch $pitch: recovered pitch", pitch.toFloat(), pose.pitchDegrees, 1e-3f)
+                    assertEquals("roll $roll: recovered roll", roll.toFloat(), pose.rollDegrees, 1e-3f)
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `level frames at different yaws get different forwards`() {
+        // The exact failure the user saw: three level frames across a pan all
+        // collapsed to due north. Distinct yaw must mean distinct forward.
+        val a = CameraBasis.fromRotationMatrix(
+            CameraBasis.of(CameraPose(72f, 0f, 0f)).toRotationMatrix()
+        )
+        val b = CameraBasis.fromRotationMatrix(
+            CameraBasis.of(CameraPose(116f, 0f, 0f)).toRotationMatrix()
+        )
+        val angleBetween = Math.toDegrees(
+            Math.acos(
+                (a.forwardX * b.forwardX + a.forwardY * b.forwardY + a.forwardZ * b.forwardZ)
+                    .coerceIn(-1.0, 1.0)
+            )
+        )
+        assertTrue(
+            "forwards 72° and 116° apart must stay apart, were $angleBetween° apart",
+            angleBetween > 40.0,
+        )
+    }
+
+    @Test
     fun `the optical axis is untouched by radial distortion`() {
         val basis = CameraBasis.of(CameraPose(0f, 0f, 0f))
         val intrinsics = FrameIntrinsics.fromFieldOfView(

@@ -5,6 +5,7 @@ import android.graphics.BitmapFactory
 import android.graphics.Matrix
 import android.util.Log
 import androidx.exifinterface.media.ExifInterface
+import com.n30dyn4m1c.photosphere.BuildConfig
 import com.n30dyn4m1c.photosphere.PhotoSphereApplication
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -26,6 +27,16 @@ import kotlin.math.roundToInt
 import kotlin.math.tan
 
 private const val TAG = "PhotoSphereStitcher"
+
+/** Debug palette for [PhotoSphereStitcher.stitchPhotos]' colour-frames mode. */
+private val DEBUG_FRAME_COLORS = listOf(
+    Scalar(90.0, 30.0, 230.0),   // blue
+    Scalar(40.0, 210.0, 80.0),   // green
+    Scalar(40.0, 40.0, 230.0),   // red
+    Scalar(220.0, 210.0, 30.0),  // yellow
+    Scalar(220.0, 40.0, 230.0),  // magenta
+    Scalar(40.0, 220.0, 230.0),  // cyan
+)
 
 /**
  * Why a stitch ended the way it did.
@@ -262,6 +273,21 @@ object PhotoSphereStitcher {
      * tripod gives; a hand-held sphere shot by swivelling on the spot wants
      * [PivotModel.HandheldBodySwivel].
      *
+     * [portraitRotationDegrees] is the clockwise turn that makes a raw
+     * (sensor-native) frame display-upright at the current display rotation —
+     * the rotation CameraX records in each still's EXIF `ORIENTATION` tag. When
+     * a frame's tag is missing or was lost in a metadata rewrite, the frame
+     * decodes in the sensor's native orientation, transposed against the
+     * portrait pose; it is rotated by this amount so its content still lands
+     * upright on the sphere.
+     *
+     * [useRefinement] opts into feature-based pose refinement. It defaults to
+     * off: the measured poses are accurate enough to stitch on their own, and
+     * refinement can move frames off them when the scene has parallax — a
+     * body-swivel capture of a close scene breaks the pure-rotation feature
+     * model the refinement assumes. Pass true to let image content correct the
+     * measured poses where the features agree.
+     *
      * [onProgress] is called from the stitching thread, not the main one — hand
      * the value to a `StateFlow` or post it rather than writing Compose state
      * from it directly.
@@ -277,6 +303,9 @@ object PhotoSphereStitcher {
         maxOutputWidth: Int = DEFAULT_MAX_OUTPUT_WIDTH,
         unsharpAmount: Float = 0f,
         pivot: PivotModel = PivotModel.None,
+        portraitRotationDegrees: Int = 90,
+        useRefinement: Boolean = false,
+        debugColorFrames: Boolean = false,
         onProgress: (StitchProgress) -> Unit = {},
     ): Result<Bitmap> = withContext(Dispatchers.Default) {
         val decoded = ArrayList<DecodedFrame>(frames.size)
@@ -314,11 +343,50 @@ object PhotoSphereStitcher {
             var verticalFov = verticalFovDegrees
             var fovChecked = false
 
+            if (frames.isNotEmpty()) {
+                Log.i(
+                    TAG,
+                    "Stitch input: ${frames.size} frames, reported FOV " +
+                        "$horizontalFovDegrees°x$verticalFovDegrees°, " +
+                        "distortion=${radialDistortion?.coefficients?.joinToString() ?: "none"}, " +
+                        "pivot=$pivot",
+                )
+            }
+
             frames.forEachIndexed { position, frame ->
                 ensureActive()
                 onProgress(StitchProgress(StitchStage.Reading, position, frames.size))
 
-                val image = readFrame(frame.file, maxInputDimension)
+                var image = readFrame(frame.file, maxInputDimension)
+
+                // A frame must land on the sphere the same way its pose describes
+                // it. The pose is display-upright, so a frame that decoded in the
+                // sensor's native (landscape) orientation — its EXIF rotation tag
+                // missing, or lost when the metadata rewrite re-encoded the JPEG
+                // — has to be turned upright *here*, or its content paints onto
+                // the sphere rotated 90° against the measured pose and no two
+                // frames line up. `portraitRotationDegrees` is exactly the turn
+                // CameraX would have recorded in the tag.
+                if (image.cols() > image.rows() && portraitRotationDegrees % 180 == 90) {
+                    Log.w(
+                        TAG,
+                        "Frame $position decoded ${image.cols()}x${image.rows()} — " +
+                            "transposed against the ${horizontalFov}°x${verticalFov}° FOV; " +
+                            "rotating ${portraitRotationDegrees}° clockwise",
+                    )
+                    image = rotateClockwise(image, portraitRotationDegrees)
+                }
+                Log.i(
+                    TAG,
+                    "Frame $position decoded ${image.cols()}x${image.rows()} at pose " +
+                        "yaw=${frame.pose.yawDegrees}° pitch=${frame.pose.pitchDegrees}° " +
+                        "roll=${frame.pose.rollDegrees}°",
+                )
+                if (debugColorFrames) {
+                    // Paint the frame a solid colour so the finished pano shows
+                    // exactly where each frame was placed — the placement check.
+                    image.setTo(DEBUG_FRAME_COLORS[position % DEBUG_FRAME_COLORS.size])
+                }
                 if (!fovChecked) {
                     val corrected = correctFovOrientation(
                         widthPx = image.cols(),
@@ -362,6 +430,11 @@ object PhotoSphereStitcher {
                 )
             }
             onProgress(StitchProgress(StitchStage.Reading, frames.size, frames.size))
+            Log.i(
+                TAG,
+                "Stitch geometry: corrected FOV ${horizontalFov}°x${verticalFov}°, " +
+                    "canvas ${canvasWidth}x${canvasWidth / 2}",
+            )
 
             ensureActive()
             // Match overlapping frames and correct the measured poses against the
@@ -369,15 +442,40 @@ object PhotoSphereStitcher {
             // The *corrected* angles go in: the pose graph is built by asking
             // which frames overlap, and a transposed field of view answers that
             // question about the wrong axis on every pair.
-            val refinement = PoseRefiner.refine(
-                frames = decoded,
-                horizontalFovDegrees = horizontalFov,
-                verticalFovDegrees = verticalFov,
-                pivotRatio = pivot.ratio,
-                onProgress = { completed, total ->
-                    onProgress(StitchProgress(StitchStage.Refining, completed, total))
-                },
-            )
+            val refinement = if (useRefinement) {
+                PoseRefiner.refine(
+                    frames = decoded,
+                    horizontalFovDegrees = horizontalFov,
+                    verticalFovDegrees = verticalFov,
+                    pivotRatio = pivot.ratio,
+                    onProgress = { completed, total ->
+                        onProgress(StitchProgress(StitchStage.Refining, completed, total))
+                    },
+                )
+            } else {
+                // Debug A/B: stitch straight from the measured poses. Refinement
+                // is the only step that replaces them, so this isolates whether
+                // a bad feature match is moving frames off the sensor's answer.
+                val sensor = decoded.map { it.sensorBasis.toRotationMatrix() }
+                RefinementResult(
+                    bases = sensor.map { CameraBasis.fromRotationMatrix(it) },
+                    gains = FloatArray(decoded.size) { 1f },
+                    matchedEdges = 0,
+                )
+            }
+
+            if (BuildConfig.DEBUG) {
+                val poses = refinement.bases.map { basis ->
+                    val p = basis.toPose()
+                    "y=${p.yawDegrees.roundToInt()}/p=${p.pitchDegrees.roundToInt()}/" +
+                        "r=${p.rollDegrees.roundToInt()}"
+                }
+                Log.i(
+                    TAG,
+                    "Refinement matched ${refinement.matchedEdges} edges; " +
+                        "refined poses: ${poses.joinToString(", ")}",
+                )
+            }
 
             val prepared = ArrayList<PreparedFrame>(decoded.size)
             decoded.indices.forEach { index ->
@@ -542,6 +640,32 @@ object PhotoSphereStitcher {
             bitmap.recycle()
         }
         return rgb
+    }
+
+    /**
+     * Rotates [source] by [degrees] clockwise in place, releasing the original.
+     *
+     * The fallback for a frame whose EXIF rotation was lost: [degrees] is the
+     * turn CameraX would have recorded, so the result is exactly what the
+     * frame's own tag should have produced. 180° is a plain flip; 90° and 270°
+     * swap the axes, which is the case this pipeline actually meets.
+     */
+    private fun rotateClockwise(source: Mat, degrees: Int): Mat {
+        val rotated = Mat()
+        try {
+            when (((degrees % 360) + 360) % 360) {
+                90 -> Core.rotate(source, rotated, Core.ROTATE_90_CLOCKWISE)
+                180 -> Core.rotate(source, rotated, Core.ROTATE_180)
+                270 -> Core.rotate(source, rotated, Core.ROTATE_90_COUNTERCLOCKWISE)
+                else -> return source
+            }
+        } catch (e: Throwable) {
+            rotated.release()
+            throw e
+        } finally {
+            source.release()
+        }
+        return rotated
     }
 
     /** Copies the finished canvas out into a bitmap the UI can show. */

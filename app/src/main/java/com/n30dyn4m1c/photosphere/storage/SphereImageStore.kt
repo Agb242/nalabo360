@@ -84,6 +84,8 @@ object SphereImageStore {
         val file: File,
         val width: Int,
         val height: Int,
+        /** Debug-only text describing the frames and geometry that made it. */
+        val diagnostics: String? = null,
     )
 
     /** Identifier for one run of guided capture. Sorts chronologically. */
@@ -172,6 +174,13 @@ object SphereImageStore {
      * and merely confirming them. Written as a `UserComment` because EXIF has no
      * standard tag for camera attitude, in a fixed `key=value;` form so it can be
      * parsed back without ambiguity.
+     *
+     * Note: this is only for frames an external tool inspects. The stitch reads
+     * the attitude out of the in-memory [com.n30dyn4m1c.photosphere.storage.BufferedFrame]
+     * instead, and it must never be applied through [ExifInterface.saveAttributes] —
+     * that rewrite re-encodes the whole JPEG and has dropped CameraX's
+     * `ORIENTATION` tag on some files, which is what `decodeUpright` rotates
+     * the frame by. The rotation tag is the one thing the file cannot lose.
      */
     fun stampCaptureOrientation(
         file: File,
@@ -182,6 +191,14 @@ object SphereImageStore {
     ) {
         try {
             ExifInterface(file).apply {
+                // Read the rotation CameraX recorded first and write it back
+                // explicitly: saveAttributes() must not silently reset it to
+                // NORMAL, or every frame of the session decodes landscape.
+                val rotation = getAttributeInt(
+                    ExifInterface.TAG_ORIENTATION,
+                    ExifInterface.ORIENTATION_NORMAL,
+                )
+                setAttribute(ExifInterface.TAG_ORIENTATION, rotation.toString())
                 setAttribute(ExifInterface.TAG_SOFTWARE, "PhotoSphere")
                 setAttribute(ExifInterface.TAG_IMAGE_DESCRIPTION, "$ALBUM frame $index")
                 setAttribute(
