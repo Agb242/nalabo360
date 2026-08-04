@@ -275,6 +275,21 @@ whole plan is rotated to start at whatever bearing the user is already facing �
 capture opens with the reticle on the first marker rather than asking for
 magnetic north.
 
+The plan is laid out against 90% of the reported field of view, not all of it
+(`FIELD_OF_VIEW_SAFETY_FACTOR`). The overlap is only ever as good as the field
+of view it is measured against, and that number is an estimate read off optics
+some phones describe loosely; overestimating it by a tenth spaces the targets a
+tenth too far apart, and the overlap is the first thing to be eaten. Spending a
+few extra frames is the cheaper mistake.
+
+**Ring or sphere.** `SphereCaptureScope` decides how many rings get laid out.
+**Ring** walks the horizon alone — a dozen-odd frames instead of forty, which is
+what most scenes actually want — and **Full sphere** walks rings out to both
+poles. The switch sits in the capture HUD until the first frame lands, after
+which the plan is fixed. It is not a commitment either way: the first ring of a
+sphere run *is* the ring run, so a sphere capture can be stitched the moment its
+horizon closes, and the HUD says which ring it is on so that moment is visible.
+
 **Where a marker goes on screen.** [`SphereProjection`](app/src/main/java/com/n30dyn4m1c/photosphere/camera/SphereProjection.kt)
 rotates a target's direction out of the world frame into the camera's own frame
 and divides through by depth — the same rectilinear projection the lens
@@ -324,6 +339,35 @@ Galaxy S23 it is tuned for sharpness:
 On a phone without a wider lens the same code path falls back to the default
 back camera, so the tuning is specific without being fragile.
 
+**Which lens the numbers describe.** The field of view is re-read from the
+camera CameraX actually bound, using its camera2 id and the resolution of the
+stream it settled on, rather than from a guess at what *would* bind. That
+matters on a phone with three rear lenses: the plan's spacing, the overlay's
+rectangles and the angle each stitched frame is taken to cover are all scaled by
+this one number, and describing the ultrawide while streaming the main lens
+spaces every target roughly twice too far apart — frames that do not overlap at
+all, and a run that fails at the end with nothing to show for it. Three things
+guard against it, all in
+[`CameraOptics`](app/src/main/java/com/n30dyn4m1c/photosphere/camera/CameraOptics.kt):
+
+- **Two independent estimates, reconciled.** One from `LENS_INTRINSIC_CALIBRATION`
+  against the *pre-correction* active array, one from physical sensor size over
+  focal length. The calibration is the more precise and wins when the geometry
+  agrees with it; past a 25% disagreement it is discarded, because a focal
+  length in millimetres over a sensor size in millimetres has no crop to be
+  quoted against and therefore no way to be off by a factor.
+- **The right focal length out of a logical multi-camera**, which lists one per
+  physical lens. The main lens is picked by its diagonal field of view landing
+  nearest ~78°; profiles that asked for the widest lens take the shortest focal
+  length instead. With no sensor size to compare against, the *longest* focal
+  length wins — guessing narrow costs frames, guessing wide costs the run.
+- **The stream's aspect ratio, not the sensor array's.** Camera2 derives a
+  differently shaped stream by cropping, so a 16:9 preview off a 4:3 sensor sees
+  a quarter less across one axis. Preview and `ImageCapture` are both pinned to
+  4:3 so one field of view describes the viewfinder and the stills alike —
+  without that, the overlay draws the angles of a frame the viewfinder never
+  shows.
+
 The geometry, the target plan and the trigger rule are pure Kotlin, and are
 covered by local unit tests in
 [`app/src/test/java/com/n30dyn4m1c/photosphere/camera/`](app/src/test/java/com/n30dyn4m1c/photosphere/camera).
@@ -372,6 +416,32 @@ reprojection, but the measured poses are not the last word:
   fits per-frame brightness gains against the overlap graph — a frame shot into
   the sun and the frame beside it recorded against it no longer meet at a
   brightness cliff inside the cross-fade.
+- [`PivotModel`](app/src/main/java/com/n30dyn4m1c/photosphere/stitching/PivotModel.kt)
+  accounts for the fact that nobody turns the phone around its own lens. A
+  panorama assumes every frame was shot from one point; holding a phone up and
+  swivelling your *body* puts the camera on the end of a lever a third of a
+  metre long, so between one frame and the one 90° later the lens has moved half
+  a metre sideways. That is translation, not rotation, and it is what shows up
+  as near objects refusing to line up while the far ones sit fine.
+
+  The geometry is simple enough to correct for, because the camera is not just
+  anywhere: it is at `leverArm × forward`, always ahead of the pivot along its
+  own optical axis, which is what holding a phone out in front of you and
+  turning does. Everything the pipeline projects is a direction from the pivot,
+  so a scene point at a nominal distance is `sceneDistance × direction` and the
+  ray the camera saw it along is that minus the lever arm. Only the *ratio* of
+  the two lengths survives the subtraction, so neither has to be measured
+  precisely — and because the lever points down the optical axis it cancels out
+  of both lateral components, leaving the renderer's inner loop one subtraction
+  heavier and nothing else. `PoseRefiner` applies the same referral to every
+  feature bearing before matching, so the pure-rotation RANSAC is solving a
+  problem that is actually a pure rotation.
+
+  The default lever arm is 0.35 m against a nominal 10 m scene. The scene
+  distance is deliberately long rather than typical: over-correcting bends
+  frames apart just as surely as parallax bends them together, and this takes
+  most of the error out of a close scene while adding under a degree to a
+  distant one — comfortably inside what the refinement absorbs.
 
 [`SphericalGeometry`](app/src/main/java/com/n30dyn4m1c/photosphere/stitching/SphericalGeometry.kt)
 holds the maths: a `CameraBasis` built from a frame's yaw/pitch/roll, the
@@ -414,13 +484,20 @@ Failures come back as a failed `Result` carrying a `StitchException` with a
 the native library missing, out of memory.
 
 **In the UI.** A **Finish & stitch** button appears in
-`PhotoSphereCameraScreen` once six frames are buffered, and a modal with a
+`PhotoSphereCameraScreen` once three frames are buffered, and a modal with a
 progress indicator covers the screen while the work runs. Both long stages report
 real progress — one frame at a time while decoding, one band at a time while
 rendering. Cancelling takes effect at the next band boundary. On success the
 sphere is written to the cache as a GPano-tagged JPEG, the buffered frames are
 deleted, and the result screen takes over; on failure the frames are kept,
 because the usual fix is to capture a few more and try again.
+
+Three is the floor, not the target. Frames are placed from their measured pose
+rather than by searching for a chain of matches, so the pipeline has no
+minimum-frames requirement of its own — what more frames buy is coverage, and
+how much coverage is enough is the user's call to make on the result screen. A
+partial capture comes back as an equirectangular image that is black where the
+sphere was never shot, at the right elevation.
 
 ## The finished sphere
 

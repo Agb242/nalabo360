@@ -95,6 +95,7 @@ internal object PoseRefiner {
         frames: List<DecodedFrame>,
         horizontalFovDegrees: Float,
         verticalFovDegrees: Float,
+        pivotRatio: Double = 0.0,
         onProgress: (completed: Int, total: Int) -> Unit = { _, _ -> },
     ): RefinementResult {
         val widest = max(horizontalFovDegrees, verticalFovDegrees)
@@ -104,7 +105,7 @@ internal object PoseRefiner {
             ORB_MAX_FEATURES, 1.2f, 8, 31, 0, 2, ORB.HARRIS_SCORE, 31, 20,
         )
         val emptyMask = Mat()
-        val features = frames.map { extractFeatures(it, orb, emptyMask) }
+        val features = frames.map { extractFeatures(it, orb, emptyMask, pivotRatio) }
         val acceptedEdges = ArrayList<RotationMath.RotationEdge>()
 
         try {
@@ -178,8 +179,20 @@ internal object PoseRefiner {
      * the ideal pinhole coordinate (the same lens model the renderer samples
      * through), and projected through the decoded intrinsics — so a bearing is
      * directly comparable to a bearing from any other frame.
+     *
+     * With a [pivotRatio] the bearing is then re-referred to the pivot: the ray
+     * is followed out to the nominal scene distance and looked back along from
+     * the axis the user turned about, then rotated back into the camera's own
+     * frame. Two frames of the same body-swivel translate relative to each
+     * other, and a pure-rotation RANSAC cannot describe that; two *pivot*
+     * bearings of the same scene point differ by a rotation alone, which it can.
      */
-    private fun extractFeatures(frame: DecodedFrame, orb: ORB, mask: Mat): FrameFeatures {
+    private fun extractFeatures(
+        frame: DecodedFrame,
+        orb: ORB,
+        mask: Mat,
+        pivotRatio: Double,
+    ): FrameFeatures {
         val gray = Mat()
         val small = Mat()
         val keypoints = MatOfKeyPoint()
@@ -208,6 +221,7 @@ internal object PoseRefiner {
             val fx = intrinsics.focalXPx
             val fy = intrinsics.focalYPx
 
+            val basis = frame.sensorBasis
             val bearings = ArrayList<DoubleArray>(keypoints.rows())
             for (kp in keypoints.toArray()) {
                 val u = kp.pt.x * scaleX
@@ -219,11 +233,15 @@ internal object PoseRefiner {
                 }
                 var x = (ideal[0] - cx) / fx
                 var y = -(ideal[1] - cy) / fy
-                val z = 1.0
                 val length = Math.sqrt(x * x + y * y + 1.0)
                 x /= length
                 y /= length
-                bearings += doubleArrayOf(x, y, 1.0 / length)
+                val z = 1.0 / length
+                bearings += if (pivotRatio > 0.0) {
+                    pivotReferredBearing(basis, pivotRatio, x, y, z)
+                } else {
+                    doubleArrayOf(x, y, z)
+                }
             }
 
             return FrameFeatures(bearings, descriptors, Core.mean(small).`val`[0])
@@ -232,6 +250,31 @@ internal object PoseRefiner {
             small.release()
             keypoints.release()
         }
+    }
+
+    /**
+     * A camera-frame bearing rewritten as the bearing a camera *at the pivot*
+     * would have recorded for the same scene point.
+     *
+     * Out to the world, out to the scene, back to the pivot, back into the
+     * camera's axes. The round trip through the sensor pose is what makes the
+     * result comparable between frames: the pivot is common to all of them,
+     * so the only thing left between two frames' pivot bearings is rotation.
+     */
+    private fun pivotReferredBearing(
+        basis: CameraBasis,
+        pivotRatio: Double,
+        x: Double,
+        y: Double,
+        z: Double,
+    ): DoubleArray {
+        val world = basis.toWorld(x, y, z)
+        val fromPivot = pivotDirection(basis, pivotRatio, world[0], world[1], world[2])
+        return doubleArrayOf(
+            basis.lateralOf(fromPivot[0], fromPivot[1], fromPivot[2]),
+            basis.verticalOf(fromPivot[0], fromPivot[1], fromPivot[2]),
+            basis.depthOf(fromPivot[0], fromPivot[1], fromPivot[2]),
+        )
     }
 
     /** Descriptor matches between two frames, filtered by the ratio test. */

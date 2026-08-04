@@ -164,8 +164,18 @@ data class SphereFrame(
  */
 object PhotoSphereStitcher {
 
-    /** Below this a sphere is not worth attempting; also what the UI gates on. */
-    const val MIN_FRAMES = 6
+    /**
+     * Below this a stitch is not worth offering; also what the UI gates on.
+     *
+     * Three, because three overlapping frames already make a panorama worth
+     * having — a corner of a room, a stretch of skyline — and holding the button
+     * back until a third of a sphere is in the buffer only turns a usable
+     * capture into a failed one. The pipeline places frames from their measured
+     * pose rather than by searching for a chain of matches, so it has no
+     * minimum-frames requirement of its own; what the extra frames buy is
+     * coverage, and coverage is the user's call to make.
+     */
+    const val MIN_FRAMES = 3
 
     /** One frame is a photo, not a panorama. */
     const val MIN_STITCHABLE_FRAMES = 2
@@ -181,10 +191,15 @@ object PhotoSphereStitcher {
 
     /**
      * Fraction of the sphere that has to be covered for the result to be worth
-     * showing. A full plan reaches about two thirds of the canvas — everything
-     * between ±60° of elevation — so this only catches runs that barely started.
+     * showing.
+     *
+     * Deliberately near the floor. Three frames of a narrow lens reach under 2%
+     * of the canvas, and a partial capture — a single ring, or a corner of a
+     * room — is now a supported outcome rather than a failed sphere, so this is
+     * only here to catch a render that reached essentially nothing. Anything
+     * above it is the user's to judge on the result screen.
      */
-    private const val MIN_COVERAGE = 0.02f
+    private const val MIN_COVERAGE = 0.002f
 
     /** Gaussian sigma for the unsharp mask, in output pixels. */
     private const val UNSHARP_RADIUS = 1.5
@@ -214,7 +229,7 @@ object PhotoSphereStitcher {
      * Stitches [frames] into a 2:1 equirectangular [Bitmap].
      *
      * The two field of view angles describe the *decoded, upright* frame — the
-     * same screen-frame angles `rememberCameraFieldOfView` reports — and set how
+     * same screen-frame angles `rememberSphereOptics` reports — and set how
      * much sphere each frame is taken to cover. Getting them wrong scales the
      * whole panorama: too narrow leaves gaps between frames, too wide overlaps
      * them.
@@ -225,6 +240,11 @@ object PhotoSphereStitcher {
      *
      * [unsharpAmount] (0 = off) is the strength of a masked unsharp mask
      * applied to the finished canvas — the perceived crispness of the output.
+     *
+     * [pivot] says how far the lens sat from the axis the capture was turned
+     * about. The default treats the two as the same point, which is what a
+     * tripod gives; a hand-held sphere shot by swivelling on the spot wants
+     * [PivotModel.HandheldBodySwivel].
      *
      * [onProgress] is called from the stitching thread, not the main one — hand
      * the value to a `StateFlow` or post it rather than writing Compose state
@@ -240,6 +260,7 @@ object PhotoSphereStitcher {
         maxInputDimension: Int = DEFAULT_MAX_INPUT_DIMENSION,
         maxOutputWidth: Int = DEFAULT_MAX_OUTPUT_WIDTH,
         unsharpAmount: Float = 0f,
+        pivot: PivotModel = PivotModel.None,
         onProgress: (StitchProgress) -> Unit = {},
     ): Result<Bitmap> = withContext(Dispatchers.Default) {
         val decoded = ArrayList<DecodedFrame>(frames.size)
@@ -302,6 +323,7 @@ object PhotoSphereStitcher {
                 frames = decoded,
                 horizontalFovDegrees = horizontalFovDegrees,
                 verticalFovDegrees = verticalFovDegrees,
+                pivotRatio = pivot.ratio,
                 onProgress = { completed, total ->
                     onProgress(StitchProgress(StitchStage.Refining, completed, total))
                 },
@@ -321,6 +343,7 @@ object PhotoSphereStitcher {
                         intrinsics = intrinsics,
                         canvasWidth = canvasWidth,
                         canvasHeight = canvasWidth / 2,
+                        pivotRatio = pivot.ratio,
                     ),
                 )
             }
@@ -335,6 +358,7 @@ object PhotoSphereStitcher {
                 canvasWidth = canvasWidth,
                 canvasHeight = canvasWidth / 2,
                 gains = refinement.gains,
+                pivotRatio = pivot.ratio,
                 onBandComplete = { completed, total ->
                     onProgress(StitchProgress(StitchStage.Stitching, completed, total))
                 },
