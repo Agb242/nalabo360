@@ -446,7 +446,13 @@ reprojection, but the measured poses are not the last word:
   describe how the lens bends the pinhole projection, so the renderer samples
   the pixel the lens really recorded and the footprint walks the true (distorted)
   border — frame edges, where seams live, land where they should instead of
-  bowing.
+  bowing. The coefficients act on coordinates normalized by the *focal length*
+  (`x_i = (x − c_x) / f_x`, the OpenCV convention), which is the one thing
+  `LENS_DISTORTION` changed about the `LENS_RADIAL_DISTORTION` key it replaced —
+  that older key normalized against the sensor array's farthest edge instead.
+  Reading one through the other's convention overstates `k1` by `(f / halfEdge)²`
+  and `k3` by the sixth power of the same, which is a correction several times
+  larger than the distortion it is meant to remove.
 - [`ExposureCompensation`](app/src/main/java/com/n30dyn4m1c/photosphere/stitching/ExposureCompensation.kt)
   fits per-frame brightness gains against the overlap graph — a frame shot into
   the sun and the frame beside it recorded against it no longer meet at a

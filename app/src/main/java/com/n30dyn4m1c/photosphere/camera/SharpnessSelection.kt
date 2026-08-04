@@ -79,9 +79,14 @@ object SharpnessSelection {
             inPreferredConfig = Bitmap.Config.ARGB_8888
         }
         val bitmap = BitmapFactory.decodeFile(file.path, options) ?: return 0f
-        val pixels = IntArray(bitmap.width * bitmap.height)
-        bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
+        // Read the dimensions out before recycling: a recycled bitmap's
+        // accessors are not contractually defined, and scoring against whatever
+        // they happen to return would silently pick the wrong frame.
+        val width = bitmap.width
+        val height = bitmap.height
+        val pixels = IntArray(width * height)
+        bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
         bitmap.recycle()
-        return laplacianVariance(pixels, bitmap.width, bitmap.height)
+        return laplacianVariance(pixels, width, height)
     }
 }

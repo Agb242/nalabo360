@@ -502,6 +502,56 @@ class SphericalGeometryTest {
         assertTrue("near $near should be smaller than far $far", near < far)
     }
 
+    @Test
+    fun `an ultra-wide lens still builds a pose graph`() {
+        // The bug this guards: the overlap test bounds a separation by
+        // `tan(fov)`, which turns negative past 90° and used to reject every
+        // pair a wide lens could see. The default device profile *prefers* the
+        // widest rear camera, so that silently disabled pose refinement and gain
+        // compensation on exactly the hardware they were tuned for.
+        val a = CameraBasis.of(CameraPose(0f, 0f, 0f))
+        val neighbour = CameraBasis.of(CameraPose(40f, 0f, 0f))
+        assertNotNull(
+            angularOverlap(a, neighbour, horizontalFovDegrees = 104f, verticalFovDegrees = 120f)
+        )
+        // And a frame facing away is still rejected, wide lens or not.
+        assertNull(
+            angularOverlap(
+                a,
+                CameraBasis.of(CameraPose(170f, 0f, 0f)),
+                horizontalFovDegrees = 104f,
+                verticalFovDegrees = 120f,
+            )
+        )
+    }
+
+    // -- The blend feather ----------------------------------------------------
+
+    @Test
+    fun `the feather is strongest on the optical axis and dies at the border`() {
+        assertEquals(1.0, featherWeight(200.0, 150.0, 200.0, 150.0), 1e-12)
+        assertEquals(0.0, featherWeight(0.0, 150.0, 200.0, 150.0), 1e-12)
+        assertEquals(0.0, featherWeight(400.0, 150.0, 200.0, 150.0), 1e-12)
+        assertEquals(0.0, featherWeight(200.0, 0.0, 200.0, 150.0), 1e-12)
+        assertTrue(
+            featherWeight(240.0, 160.0, 200.0, 150.0) <
+                featherWeight(210.0, 152.0, 200.0, 150.0)
+        )
+    }
+
+    @Test
+    fun `a pixel outside the frame on both axes never earns a weight`() {
+        // Two negative factors multiply into a positive one. Radial distortion
+        // can pull a pixel whose *ideal* position is well outside the frame back
+        // inside the distorted bounds, and an unclamped feather would then hand
+        // a direction the frame never saw a full-strength vote in the blend —
+        // and, at an odd blend power, a negative one that subtracts colour from
+        // its neighbours.
+        assertEquals(0.0, featherWeight(-500.0, -400.0, 200.0, 150.0), 1e-12)
+        assertEquals(0.0, featherWeight(900.0, 700.0, 200.0, 150.0), 1e-12)
+        assertEquals(0.0, featherWeight(-500.0, 150.0, 200.0, 150.0), 1e-12)
+    }
+
     @Test(expected = IllegalArgumentException::class)
     fun `an impossible field of view is rejected rather than warped around`() {
         FrameIntrinsics.fromFieldOfView(1000, 1000, 180f, 60f)

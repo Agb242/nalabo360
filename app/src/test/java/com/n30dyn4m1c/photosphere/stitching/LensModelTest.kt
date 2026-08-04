@@ -1,29 +1,39 @@
 package com.n30dyn4m1c.photosphere.stitching
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlin.math.tan
 
 /**
  * The radial lens model that keeps frame edges honest.
  */
 class LensModelTest {
 
-    // Realistic phone-lens barrel distortion, in the *normalized* space the
-    // camera2 API uses: the axes are scaled so the farthest edge of the
-    // calibration array sits at ±1. A k1 of −0.02 pulls the frame corner
-    // inward by roughly 3% (r² = 2 at the corner of a 4:3 array).
+    // Realistic phone-lens barrel distortion, in the *normalized* space
+    // `CameraCharacteristics.LENS_DISTORTION` uses: coordinates divided by the
+    // focal length, exactly as OpenCV does it. A k1 of −0.02 pulls a ray 30°
+    // off the axis in by roughly 0.7%.
     private val unitlessCoefficients = doubleArrayOf(-0.02, 1.0e-3, -5.0e-5)
 
-    // The same lens re-expressed as pixel-space coefficients for a ~1024px
-    // working image, which is what the pipeline feeds to the renderer.
-    private val smallCoefficients =
-        RadialDistortion(unitlessCoefficients, 4000).effectiveFor(1024)!!
+    private val lens = RadialDistortion(unitlessCoefficients)
 
-    private val centreX = 512.0
-    private val centreY = 384.0
+    /** A 1024×768 working frame across 66°, which is what the stitch decodes to. */
+    private val workingFrame = FrameIntrinsics.forLens(
+        widthPx = 1024,
+        heightPx = 768,
+        horizontalFovDegrees = 66f,
+        verticalFovDegrees = 52f,
+        distortion = lens,
+    )
+
+    private val smallCoefficients = workingFrame.radial!!
+
+    private val centreX = workingFrame.centerXPx
+    private val centreY = workingFrame.centerYPx
 
     @Test
     fun `the optical centre is unmoved by distortion`() {
@@ -57,7 +67,8 @@ class LensModelTest {
             64.0 to 740.0,
         )) {
             val distorted = distortPixel(column, row, centreX, centreY, smallCoefficients)
-            val recovered = undistortPixel(distorted[0], distorted[1], centreX, centreY, smallCoefficients)
+            val recovered =
+                undistortPixel(distorted[0], distorted[1], centreX, centreY, smallCoefficients)
             assertEquals("column $column", column, recovered[0], 1e-3)
             assertEquals("row $row", row, recovered[1], 1e-3)
         }
@@ -70,44 +81,89 @@ class LensModelTest {
         assertEquals(700.0, pinhole[1], 1e-12)
     }
 
+    // -- The normalization LENS_DISTORTION actually uses ----------------------
+
     @Test
-    fun `effectiveFor converts the normalized polynomial into pixel space`() {
-        // A pixel offset p is the normalized offset p/(edge/2), so the term of
-        // order 2n divides by (edge/2)^(2n): k1 by h^2, k2 by h^4, k3 by h^6.
-        val effective = RadialDistortion(unitlessCoefficients, 4000).effectiveFor(1000)
+    fun `pixel coefficients divide by the focal length, not the frame edge`() {
+        // This is the whole of the LENS_DISTORTION contract: `x_i = (x - c_x)/f`,
+        // so a term of order 2n divides by f^(2n). Getting this wrong by using
+        // the deprecated LENS_RADIAL_DISTORTION's "array edge = ±1" convention
+        // overstates k1 by (f / halfEdge)^2 — more than double on a normal lens
+        // — and k3 by the sixth power of the same.
+        val focal = 1234.5
+        val effective = lens.pixelCoefficientsFor(focal)
         assertNotNull(effective)
-        val h = 500.0
-        assertEquals(unitlessCoefficients[0] / (h * h), effective!![0], 1e-15)
-        assertEquals(unitlessCoefficients[1] / (h * h * h * h), effective[1], 1e-20)
-        assertEquals(unitlessCoefficients[2] / (h * h * h * h * h * h), effective[2], 1e-25)
+        assertEquals(unitlessCoefficients[0] / Math.pow(focal, 2.0), effective!![0], 1e-18)
+        assertEquals(unitlessCoefficients[1] / Math.pow(focal, 4.0), effective[1], 1e-24)
+        assertEquals(unitlessCoefficients[2] / Math.pow(focal, 6.0), effective[2], 1e-30)
     }
 
     @Test
-    fun `a missing calibration reports nothing to correct`() {
-        assertEquals(null, RadialDistortion(doubleArrayOf(), 4000).effectiveFor(1000))
-        assertNull(RadialDistortion(doubleArrayOf(-1.0, 0.0, 0.0), 0).effectiveFor(1000))
-        assertNull(RadialDistortion(unitlessCoefficients, 4000).effectiveFor(0))
+    fun `the working frame is normalized against its own focal length`() {
+        // 1024 px across 66° is a focal length of 1024/2/tan(33°) ≈ 788 px. The
+        // vertical axis lands within a pixel of the same number, which is what
+        // "square pixels" means and why one focal length can carry the radial
+        // polynomial for both.
+        val expectedFocal = 512.0 / tan(Math.toRadians(33.0))
+        assertEquals(expectedFocal, workingFrame.focalXPx, 1e-9)
+        assertEquals(expectedFocal, workingFrame.focalPx, 1.0)
+
+        val focal = workingFrame.focalPx
+        assertEquals(unitlessCoefficients[0] / (focal * focal), smallCoefficients[0], 1e-18)
+    }
+
+    @Test
+    fun `a distortion this camera did not report is nothing to correct`() {
+        assertNull(RadialDistortion(doubleArrayOf()).pixelCoefficientsFor(1000.0))
+        assertNull(RadialDistortion(doubleArrayOf(-1.0, 0.0)).pixelCoefficientsFor(1000.0))
+        assertNull(lens.pixelCoefficientsFor(0.0))
+        assertNull(lens.pixelCoefficientsFor(Double.NaN))
+    }
+
+    @Test
+    fun `an all-zero calibration is a pinhole and is skipped entirely`() {
+        val pinhole = RadialDistortion(doubleArrayOf(0.0, 0.0, 0.0))
+        assertFalse(pinhole.isSignificant)
+        assertNull(pinhole.pixelCoefficientsFor(1500.0))
+        // And a frame built for it carries no polynomial into the inner loop.
+        assertNull(
+            FrameIntrinsics.forLens(1024, 768, 66f, 52f, pinhole).radial
+        )
     }
 
     @Test
     fun `the two resolutions describe the same lens`() {
-        // Distorting in a 4000px frame then dividing the coordinates by four is
-        // the same physical result as distorting in a 1000px frame: both sample
-        // the same lens at the same field of view.
-        val atFull = RadialDistortion(unitlessCoefficients, 4000).effectiveFor(4000)!!
-        val atScaled = RadialDistortion(unitlessCoefficients, 4000).effectiveFor(1000)!!
+        // Two decodes of one capture: the same physical ray must land on the
+        // same *fraction* of the frame however coarsely it was decoded, which is
+        // what makes the correction independent of the subsampling factor.
+        val full = FrameIntrinsics.forLens(4000, 3000, 66f, 52f, lens)
+        val small = FrameIntrinsics.forLens(1000, 750, 66f, 52f, lens)
 
-        val full = distortPixel(4000.0, 0.0, 2000.0, 0.0, atFull)[0]
-        val scaled = distortPixel(1000.0, 0.0, 500.0, 0.0, atScaled)[0]
-        assertEquals(full / 4.0, scaled, 1e-6)
+        val atFull = distortPixel(
+            4000.0, full.centerYPx, full.centerXPx, full.centerYPx, full.radial!!,
+        )[0]
+        val atSmall = distortPixel(
+            1000.0, small.centerYPx, small.centerXPx, small.centerYPx, small.radial!!,
+        )[0]
+        assertEquals(atFull / 4.0, atSmall, 1e-6)
     }
 
     @Test
-    fun `a pixel-space coefficient from a realistic lens stays small`() {
-        // The bug this guards against: a unitless k1 of -0.02 must come back as
-        // ~2e-8 at 2000px, not -0.08. Treating it as the latter pushes every
-        // source pixel out of the frame and the stitch covers nothing.
-        val effective = RadialDistortion(unitlessCoefficients, 4000).effectiveFor(2000)!!
-        assertEquals(-2.0e-8, effective[0], 1e-12)
+    fun `a realistic lens moves a frame corner by a believable amount`() {
+        // The guard against a normalization that is off by a power: a phone
+        // lens's own corner should move by a couple of percent, not by a third
+        // of the frame (which pushes every source pixel out of bounds and makes
+        // the stitch cover nothing) and not by a hundredth of a pixel.
+        val corner = distortPixel(
+            workingFrame.widthPx - 1.0,
+            workingFrame.heightPx - 1.0,
+            centreX,
+            centreY,
+            smallCoefficients,
+        )
+        val before = Math.hypot(workingFrame.widthPx - 1.0 - centreX, workingFrame.heightPx - 1.0 - centreY)
+        val after = Math.hypot(corner[0] - centreX, corner[1] - centreY)
+        val shift = (before - after) / before
+        assertTrue("corner moved by ${shift * 100}%, expected 0.1%..10%", shift in 0.001..0.10)
     }
 }

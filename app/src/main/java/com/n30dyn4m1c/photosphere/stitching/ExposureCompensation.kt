@@ -30,6 +30,29 @@ internal object ExposureCompensation {
     private const val ITERATIONS = 12
 
     /**
+     * How far a single frame's gain may stray from neutral.
+     *
+     * The whole-frame mean is a coarse stand-in for the brightness of the
+     * *shared* region, so a frame that happens to differ from its neighbour for
+     * an honest reason — half of it is sky — pulls its own gain in a direction
+     * the overlap never asked for. A long chain of those compounds. Clamping
+     * keeps the compensation doing what it is for (shaving a seam) and stops it
+     * doing what it is not (blowing out a frame).
+     *
+     * Set as a safety rail rather than as a policy: two-thirds of a stop is
+     * more correction than an AE-locked session of one scene has any business
+     * needing, so the clamp is inert on a healthy run and only bites when the
+     * solve has run away.
+     */
+    const val MAX_GAIN: Float = 1.6f
+
+    /** The reciprocal of [MAX_GAIN]; a gain is clamped symmetrically in log space. */
+    const val MIN_GAIN: Float = 1f / MAX_GAIN
+
+    /** Below this a frame is blank and takes no part in the solve. */
+    private const val MIN_USABLE_LUMA = 1e-6
+
+    /**
      * Gains for frames whose mean luminance is [meanLuma], solved over [edges].
      *
      * [edges] lists which frame pairs overlap; the pairs may be given in either
@@ -40,45 +63,49 @@ internal object ExposureCompensation {
         val size = meanLuma.size
         if (size == 0) return FloatArray(0)
 
-        val usable = BooleanArray(size)
-        for (i in 0 until size) usable[i] = meanLuma[i] > 1e-6
-
-        // Directed neighbour pairs, so every edge contributes both directions.
-        // A frame is "connected" if it shares at least one edge: only connected
-        // frames take part in the solve and the gain normalisation.
-        val connected = BooleanArray(size)
-        val directed = ArrayList<Pair<Int, Int>>()
+        // Adjacency, held as flat arrays rather than a map of pairs: the solve
+        // sweeps every frame's neighbours a dozen times, and a scan of the whole
+        // edge list per frame per sweep is quadratic in the session's size for
+        // no reason.
+        val degree = IntArray(size)
+        val usable = BooleanArray(size) { meanLuma[it] > MIN_USABLE_LUMA }
         edges.forEach { (a, b) ->
-            if (a in 0 until size && b in 0 until size && usable[a] && usable[b]) {
-                directed += a to b
-                directed += b to a
-                connected[a] = true
-                connected[b] = true
+            if (a in 0 until size && b in 0 until size && a != b && usable[a] && usable[b]) {
+                degree[a]++
+                degree[b]++
             }
         }
-        // d_ij = log m_j - log m_i makes the edge equation l_i = l_j + d_ij.
-        val delta = HashMap<Pair<Int, Int>, Double>(directed.size)
-        directed.forEach { (from, to) ->
-            delta[from to to] = ln(meanLuma[to]) - ln(meanLuma[from])
+
+        val offsets = IntArray(size + 1)
+        for (i in 0 until size) offsets[i + 1] = offsets[i] + degree[i]
+        val neighbours = IntArray(offsets[size])
+        val cursor = offsets.copyOf(size)
+        edges.forEach { (a, b) ->
+            if (a in 0 until size && b in 0 until size && a != b && usable[a] && usable[b]) {
+                neighbours[cursor[a]++] = b
+                neighbours[cursor[b]++] = a
+            }
         }
 
+        val logLuma = DoubleArray(size) { if (usable[it]) ln(meanLuma[it]) else 0.0 }
         val logGain = DoubleArray(size)
 
         // Gauss-Seidel over the edge equations: each frame's log-gain is the
-        // average of what its neighbours imply, which is a linear solve that a
-        // dozen sweeps converge for a graph this small.
+        // average of what its neighbours imply, which is the normal equation of
+        // the least-squares fit and converges in a dozen sweeps for a graph this
+        // small. `d_ij = log m_j − log m_i` makes the edge equation
+        // `l_i = l_j + d_ij`.
         repeat(ITERATIONS) {
             for (i in 0 until size) {
-                if (!connected[i]) continue
+                val start = offsets[i]
+                val end = offsets[i + 1]
+                if (end <= start) continue
                 var sum = 0.0
-                var count = 0
-                for (edge in directed) {
-                    if (edge.first == i) {
-                        sum += logGain[edge.second] + delta[edge]!!
-                        count++
-                    }
+                for (slot in start until end) {
+                    val j = neighbours[slot]
+                    sum += logGain[j] + logLuma[j] - logLuma[i]
                 }
-                if (count > 0) logGain[i] = sum / count
+                logGain[i] = sum / (end - start)
             }
         }
 
@@ -87,17 +114,22 @@ internal object ExposureCompensation {
         // connected gains are scaled to a geometric mean of one. Frames with no
         // overlap partner have no equation to satisfy and stay exactly neutral.
         var logSum = 0.0
-        var count = 0
+        var connectedCount = 0
         for (i in 0 until size) {
-            if (connected[i]) {
+            if (offsets[i + 1] > offsets[i]) {
                 logSum += logGain[i]
-                count++
+                connectedCount++
             }
         }
-        val offset = if (count > 0) logSum / count else 0.0
+        val offset = if (connectedCount > 0) logSum / connectedCount else 0.0
 
+        val maxLog = ln(MAX_GAIN.toDouble())
         return FloatArray(size) { i ->
-            if (connected[i]) exp(logGain[i] - offset).toFloat() else 1f
+            if (offsets[i + 1] <= offsets[i]) {
+                1f
+            } else {
+                exp((logGain[i] - offset).coerceIn(-maxLog, maxLog)).toFloat()
+            }
         }
     }
 }

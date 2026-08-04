@@ -8,10 +8,8 @@ import org.opencv.core.Size
 import org.opencv.features2d.DescriptorMatcher
 import org.opencv.features2d.ORB
 import org.opencv.imgproc.Imgproc
-import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.roundToInt
-import kotlin.math.tan
 import kotlin.random.Random
 
 /**
@@ -111,12 +109,15 @@ internal object PoseRefiner {
         val emptyMask = Mat()
         val features = frames.map { extractFeatures(it, orb, emptyMask, pivotRatio) }
         val acceptedEdges = ArrayList<RotationMath.RotationEdge>()
+        // One matcher for the whole pass: `create` builds a native object, and
+        // the pose graph asks it for a hundred-odd pairs.
+        val matcher = DescriptorMatcher.create(DescriptorMatcher.BRUTEFORCE_HAMMING)
 
         try {
             val total = candidateEdges.size
             var done = 0
             for ((first, second) in candidateEdges) {
-                val matches = match(features[first], features[second])
+                val matches = match(matcher, features[first], features[second])
                 if (matches.size >= MIN_MATCHES) {
                     val from = Array(matches.size) { features[first].bearings[matches[it].first] }
                     val to = Array(matches.size) { features[second].bearings[matches[it].second] }
@@ -164,6 +165,7 @@ internal object PoseRefiner {
             return RefinementResult(refined, gains, acceptedEdges.size)
         } finally {
             features.forEach { it.descriptors.release() }
+            matcher.clear()
             orb.clear()
             emptyMask.release()
         }
@@ -282,9 +284,13 @@ internal object PoseRefiner {
     }
 
     /** Descriptor matches between two frames, filtered by the ratio test. */
-    private fun match(a: FrameFeatures, b: FrameFeatures): List<Pair<Int, Int>> {
+    private fun match(
+        matcher: DescriptorMatcher,
+        a: FrameFeatures,
+        b: FrameFeatures,
+    ): List<Pair<Int, Int>> {
         if (a.bearings.isEmpty() || b.bearings.isEmpty()) return emptyList()
-        val matcher = DescriptorMatcher.create(DescriptorMatcher.BRUTEFORCE_HAMMING)
+        if (a.descriptors.empty() || b.descriptors.empty()) return emptyList()
         val knn = ArrayList<MatOfDMatch>()
         try {
             matcher.knnMatch(a.descriptors, b.descriptors, knn, 2)
@@ -300,7 +306,6 @@ internal object PoseRefiner {
             return matched
         } finally {
             knn.forEach { it.release() }
-            matcher.clear()
         }
     }
 
@@ -347,30 +352,4 @@ internal object PoseRefiner {
     }
 
     private fun seedFor(a: Int, b: Int): Long = (a.toLong() * 31 + b.toLong() * 17) and 0x7fffffffL
-}
-
-/**
- * How much two aims overlap, or null when they do not.
- *
- * The second camera's aim is projected into the first's camera frame and must
- * land within one field of view on both axes — the condition for two
- * axis-aligned field-of-view windows to intersect. The returned value is the
- * squared angular separation (tangent-space), so a smaller value is a stronger
- * shared view, which is how the pose graph orders its edges.
- */
-internal fun angularOverlap(
-    a: CameraBasis,
-    b: CameraBasis,
-    horizontalFovDegrees: Float,
-    verticalFovDegrees: Float,
-): Double? {
-    val lateral = a.lateralOf(b.forwardX, b.forwardY, b.forwardZ)
-    val vertical = a.verticalOf(b.forwardX, b.forwardY, b.forwardZ)
-    val depth = a.depthOf(b.forwardX, b.forwardY, b.forwardZ)
-    if (depth <= MIN_DEPTH) return null
-    val horizontalSeparation = abs(lateral / depth)
-    val verticalSeparation = abs(vertical / depth)
-    if (horizontalSeparation >= tan(Math.toRadians(horizontalFovDegrees.toDouble()))) return null
-    if (verticalSeparation >= tan(Math.toRadians(verticalFovDegrees.toDouble()))) return null
-    return horizontalSeparation * horizontalSeparation + verticalSeparation * verticalSeparation
 }

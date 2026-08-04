@@ -83,7 +83,18 @@ object SphereProjection {
     }
 
     /** Where [target] sits relative to the camera at [orientation]. */
-    fun project(orientation: OrientationData, target: SphereTarget): TargetView {
+    fun project(orientation: OrientationData, target: SphereTarget): TargetView =
+        cameraFrame(orientation).project(target)
+
+    /**
+     * The camera's axes for one attitude, ready to project many targets through.
+     *
+     * The overlay redraws the whole plan every frame — hundreds of markers at
+     * display rate — and the axes are the same for all of them. Building them
+     * once per draw instead of once per marker takes the per-marker cost down to
+     * nine multiplies.
+     */
+    fun cameraFrame(orientation: OrientationData): CameraFrame {
         val yaw = Math.toRadians(orientation.yawDegrees.toDouble())
         val elevation = Math.toRadians(orientation.elevationDegrees().toDouble())
         val roll = Math.toRadians(orientation.rollDegrees.toDouble())
@@ -111,27 +122,16 @@ object SphereProjection {
         // f × r = -u and f × u = r.
         val cosRoll = cos(roll)
         val sinRoll = sin(roll)
-        val rx = r0x * cosRoll - u0x * sinRoll
-        val ry = r0y * cosRoll - u0y * sinRoll
-        val rz = -u0z * sinRoll
-        val ux = u0x * cosRoll + r0x * sinRoll
-        val uy = u0y * cosRoll + r0y * sinRoll
-        val uz = u0z * cosRoll
-
-        // The target's direction, in the same world frame.
-        val targetYaw = Math.toRadians(target.yawDegrees.toDouble())
-        val targetElevation = Math.toRadians(target.elevationDegrees.toDouble())
-        val cosTargetElevation = cos(targetElevation)
-        val dx = sin(targetYaw) * cosTargetElevation
-        val dy = cos(targetYaw) * cosTargetElevation
-        val dz = sin(targetElevation)
-
-        val z = dx * fx + dy * fy + dz * fz
-        return TargetView(
-            x = (dx * rx + dy * ry + dz * rz).toFloat(),
-            y = (dx * ux + dy * uy + dz * uz).toFloat(),
-            z = z.toFloat(),
-            angularDistanceDegrees = Math.toDegrees(acos(z.coerceIn(-1.0, 1.0))).toFloat(),
+        return CameraFrame(
+            forwardX = fx,
+            forwardY = fy,
+            forwardZ = fz,
+            rightX = r0x * cosRoll - u0x * sinRoll,
+            rightY = r0y * cosRoll - u0y * sinRoll,
+            rightZ = -u0z * sinRoll,
+            upX = u0x * cosRoll + r0x * sinRoll,
+            upY = u0y * cosRoll + r0y * sinRoll,
+            upZ = u0z * cosRoll,
         )
     }
 
@@ -147,6 +147,39 @@ object SphereProjection {
         project(orientation, target).angularDistanceDegrees
 
     private fun tanHalf(degrees: Float): Double = tan(Math.toRadians(degrees / 2.0))
+}
+
+/**
+ * The camera's orthonormal axes in the world frame (X east, Y north, Z up).
+ *
+ * Built once per attitude by [SphereProjection.cameraFrame]; the components are
+ * held as flat doubles so projecting a target allocates nothing beyond the
+ * result.
+ */
+class CameraFrame internal constructor(
+    private val forwardX: Double,
+    private val forwardY: Double,
+    private val forwardZ: Double,
+    private val rightX: Double,
+    private val rightY: Double,
+    private val rightZ: Double,
+    private val upX: Double,
+    private val upY: Double,
+    private val upZ: Double,
+) {
+    /** Where [target] sits relative to this camera. */
+    fun project(target: SphereTarget): TargetView {
+        val dx = target.directionX
+        val dy = target.directionY
+        val dz = target.directionZ
+        val z = dx * forwardX + dy * forwardY + dz * forwardZ
+        return TargetView(
+            x = (dx * rightX + dy * rightY + dz * rightZ).toFloat(),
+            y = (dx * upX + dy * upY + dz * upZ).toFloat(),
+            z = z.toFloat(),
+            angularDistanceDegrees = Math.toDegrees(acos(z.coerceIn(-1.0, 1.0))).toFloat(),
+        )
+    }
 }
 
 /** Height above the horizon, positive up. See [SphereTarget.elevationDegrees]. */

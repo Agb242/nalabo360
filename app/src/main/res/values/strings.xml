@@ -23,7 +23,8 @@
     <string name="capture_hint_hold">Hold still…</string>
     <string name="capture_hint_ring_done">Band %1$d of %2$d covered — stitch now, or keep going</string>
     <string name="capture_waiting_for_orientation">Finding your bearing…</string>
-    <string name="capture_low_accuracy">Compass unreliable — wave the phone in a figure eight</string>
+    <string name="capture_low_accuracy">Compass roughly calibrated — a figure eight will sharpen it</string>
+    <string name="capture_accuracy_blocked">Compass unreliable — wave the phone in a figure eight</string>
     <string name="capture_orientation_unavailable">This device has no rotation vector sensor, so guided capture is unavailable.</string>
     <string name="capture_sphere_complete">Sphere complete</string>
     <string name="capture_restart">Start a new sphere</string>

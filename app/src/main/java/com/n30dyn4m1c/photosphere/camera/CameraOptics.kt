@@ -15,7 +15,6 @@ import com.n30dyn4m1c.photosphere.sensor.currentDisplayRotation
 import com.n30dyn4m1c.photosphere.stitching.RadialDistortion
 import kotlin.math.abs
 import kotlin.math.atan
-import kotlin.math.max
 import kotlin.math.sqrt
 import kotlin.math.tan
 
@@ -216,7 +215,12 @@ internal fun estimateSphereOptics(
                         "stream=$streamAspectRatio -> $sensorFieldOfView",
                 )
 
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && array != null) {
+                // LENS_DISTORTION's coefficients act on coordinates normalized
+                // by the focal length, so they carry no resolution of their own
+                // — the stitcher rescales them against whatever frame it is
+                // looking at. Only the three radial terms are taken; the two
+                // tangential ones that follow are negligible on a phone lens.
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                     val kappa = characteristics.get(CameraCharacteristics.LENS_DISTORTION)
                     if (kappa != null && kappa.size >= 3) {
                         radialDistortion = RadialDistortion(
@@ -225,8 +229,7 @@ internal fun estimateSphereOptics(
                                 kappa[1].toDouble(),
                                 kappa[2].toDouble(),
                             ),
-                            calibrationLongestEdgePx = max(array.width(), array.height()),
-                        )
+                        ).takeIf { it.isSignificant }
                     }
                 }
             }

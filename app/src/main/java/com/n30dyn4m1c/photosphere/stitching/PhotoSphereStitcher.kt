@@ -15,10 +15,13 @@ import org.opencv.android.OpenCVLoader
 import org.opencv.android.Utils
 import org.opencv.core.Core
 import org.opencv.core.Mat
+import org.opencv.core.Rect
 import org.opencv.core.Scalar
 import org.opencv.core.Size
 import org.opencv.imgproc.Imgproc
 import java.io.File
+import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.tan
 
@@ -208,6 +211,18 @@ object PhotoSphereStitcher {
     /** Pixels brighter than this count as shot content rather than a gap. */
     private const val UNSHARP_CONTENT_THRESHOLD = 24.0
 
+    /** Rows the unsharp mask sharpens at a time. */
+    private const val UNSHARP_BAND_HEIGHT = 256
+
+    /**
+     * Rows of context carried either side of a band.
+     *
+     * The Gaussian reaches [UNSHARP_RADIUS]·3 pixels or so; a band blurred
+     * without its neighbours would darken toward its own edges and leave a
+     * horizontal line every [UNSHARP_BAND_HEIGHT] rows.
+     */
+    private const val UNSHARP_HALO = 16
+
     @Volatile
     private var isOpenCvReady: Boolean = false
 
@@ -304,7 +319,6 @@ object PhotoSphereStitcher {
                 onProgress(StitchProgress(StitchStage.Reading, position, frames.size))
 
                 val image = readFrame(frame.file, maxInputDimension)
-                val longest = maxOf(image.cols(), image.rows())
                 if (!fovChecked) {
                     val corrected = correctFovOrientation(
                         widthPx = image.cols(),
@@ -324,12 +338,15 @@ object PhotoSphereStitcher {
                     }
                     fovChecked = true
                 }
-                val intrinsics = FrameIntrinsics.fromFieldOfView(
+                // The lens's unitless coefficients are converted against the
+                // focal length *this* decoded frame implies, so a frame
+                // subsampled to any size still carries the same physical lens.
+                val intrinsics = FrameIntrinsics.forLens(
                     widthPx = image.cols(),
                     heightPx = image.rows(),
                     horizontalFovDegrees = horizontalFov,
                     verticalFovDegrees = verticalFov,
-                    radial = radialDistortion?.effectiveFor(longest),
+                    distortion = radialDistortion,
                 )
                 if (position == 0) {
                     canvasWidth = canvasWidthFor(
@@ -349,10 +366,13 @@ object PhotoSphereStitcher {
             ensureActive()
             // Match overlapping frames and correct the measured poses against the
             // content. Falls back to the sensor poses when nothing matches.
+            // The *corrected* angles go in: the pose graph is built by asking
+            // which frames overlap, and a transposed field of view answers that
+            // question about the wrong axis on every pair.
             val refinement = PoseRefiner.refine(
                 frames = decoded,
-                horizontalFovDegrees = horizontalFovDegrees,
-                verticalFovDegrees = verticalFovDegrees,
+                horizontalFovDegrees = horizontalFov,
+                verticalFovDegrees = verticalFov,
                 pivotRatio = pivot.ratio,
                 onProgress = { completed, total ->
                     onProgress(StitchProgress(StitchStage.Refining, completed, total))
@@ -532,29 +552,93 @@ object PhotoSphereStitcher {
     }
 
     /**
-     * Applies a masked unsharp mask to the finished canvas.
+     * Applies a masked unsharp mask to the finished canvas, in place.
      *
      * `out = src + amount·(src − blur)` lifts the edge contrast that reads as
      * sharpness. The mask restricts it to pixels that were actually shot: the
      * black bands where the sphere was never captured must not grow a bright
      * rim, and near-black pixels (a night shot) are left alone so noise is not
      * sharpened along with the edges.
+     *
+     * **Memory.** Done whole, this is the peak of the entire pipeline: a blur, a
+     * sharpened copy, a greyscale and a mask all at canvas size, which on the
+     * 6144-wide profile is around 200 MB of native buffers on top of the canvas
+     * itself. Working in bands holds one untouched copy of the canvas and four
+     * band-sized temporaries instead. The copy is what keeps the result
+     * identical to the whole-canvas version: every band reads its blur input
+     * from the original pixels, so a band's halo cannot pick up the sharpening
+     * its neighbour just wrote and sharpen it a second time.
      */
     private fun applyUnsharpMask(canvas: Mat, amount: Float) {
         if (amount <= 0f) return
+        val height = canvas.rows()
+        val width = canvas.cols()
+        if (height <= 0 || width <= 0) return
+
+        val source = canvas.clone()
+        try {
+            var bandTop = 0
+            while (bandTop < height) {
+                val bandHeight = min(UNSHARP_BAND_HEIGHT, height - bandTop)
+                // The band plus the context the Gaussian needs, clipped to the
+                // canvas at the top and bottom rows.
+                val haloTop = max(0, bandTop - UNSHARP_HALO)
+                val haloBottom = min(height, bandTop + bandHeight + UNSHARP_HALO)
+                sharpenBand(
+                    source = source,
+                    canvas = canvas,
+                    width = width,
+                    haloTop = haloTop,
+                    haloHeight = haloBottom - haloTop,
+                    bandTop = bandTop,
+                    bandHeight = bandHeight,
+                    amount = amount,
+                )
+                bandTop += bandHeight
+            }
+        } finally {
+            source.release()
+        }
+    }
+
+    /** Sharpens one band of [canvas], reading its blur input from [source]. */
+    private fun sharpenBand(
+        source: Mat,
+        canvas: Mat,
+        width: Int,
+        haloTop: Int,
+        haloHeight: Int,
+        bandTop: Int,
+        bandHeight: Int,
+        amount: Float,
+    ) {
+        val halo = source.submat(Rect(0, haloTop, width, haloHeight))
         val blurred = Mat()
-        val sharpened = Mat()
+        val sharpenedHalo = Mat()
         val gray = Mat()
         val mask = Mat()
         try {
-            Imgproc.GaussianBlur(canvas, blurred, Size(0.0, 0.0), UNSHARP_RADIUS)
-            Core.addWeighted(canvas, 1.0 + amount, blurred, -amount.toDouble(), 0.0, sharpened)
-            Imgproc.cvtColor(canvas, gray, Imgproc.COLOR_RGB2GRAY)
-            Core.compare(gray, Scalar(UNSHARP_CONTENT_THRESHOLD), mask, Core.CMP_GT)
-            sharpened.copyTo(canvas, mask)
+            Imgproc.GaussianBlur(halo, blurred, Size(0.0, 0.0), UNSHARP_RADIUS)
+            Core.addWeighted(halo, 1.0 + amount, blurred, -amount.toDouble(), 0.0, sharpenedHalo)
+
+            // Only the band itself is written back; the halo was context.
+            val bandInHalo = Rect(0, bandTop - haloTop, width, bandHeight)
+            val sharpenedBand = sharpenedHalo.submat(bandInHalo)
+            val sourceBand = source.submat(Rect(0, bandTop, width, bandHeight))
+            val target = canvas.submat(Rect(0, bandTop, width, bandHeight))
+            try {
+                Imgproc.cvtColor(sourceBand, gray, Imgproc.COLOR_RGB2GRAY)
+                Core.compare(gray, Scalar(UNSHARP_CONTENT_THRESHOLD), mask, Core.CMP_GT)
+                sharpenedBand.copyTo(target, mask)
+            } finally {
+                sharpenedBand.release()
+                sourceBand.release()
+                target.release()
+            }
         } finally {
+            halo.release()
             blurred.release()
-            sharpened.release()
+            sharpenedHalo.release()
             gray.release()
             mask.release()
         }

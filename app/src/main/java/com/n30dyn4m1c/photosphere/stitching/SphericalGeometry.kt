@@ -1,11 +1,13 @@
 package com.n30dyn4m1c.photosphere.stitching
 
+import kotlin.math.abs
 import kotlin.math.asin
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sin
+import kotlin.math.sqrt
 import kotlin.math.tan
 
 /**
@@ -96,8 +98,6 @@ class CameraBasis private constructor(
         val up0X = -sinYaw * sinElevation
         val up0Y = -cosYaw * sinElevation
         val up0Z = cos(elevationR)
-        val right0X = cosYaw
-        val right0Y = -sinYaw
         val roll = Math.toDegrees(
             atan2(
                 -(rightX * up0X + rightY * up0Y + rightZ * up0Z),
@@ -189,8 +189,8 @@ data class FrameIntrinsics(
     val focalYPx: Double,
     /**
      * Brown-Conrady radial coefficients `[k1, k2, k3]`, already rescaled to this
-     * frame's pixel size (see [RadialDistortion.effectiveFor]), or null when the
-     * camera does not describe its distortion.
+     * frame's focal length (see [RadialDistortion.pixelCoefficientsFor]), or
+     * null when the camera does not describe its distortion.
      */
     val radial: DoubleArray? = null,
 ) {
@@ -202,8 +202,25 @@ data class FrameIntrinsics(
     val centerXPx: Double get() = widthPx / 2.0
     val centerYPx: Double get() = heightPx / 2.0
 
+    /**
+     * The single focal length the radial model is normalized against.
+     *
+     * The distortion polynomial takes one scalar `r²`, while the projection
+     * keeps a focal length per axis. Square pixels make the two agree, so the
+     * geometric mean is exact for any real sensor and degrades gracefully if a
+     * loosely-described lens makes them differ slightly.
+     */
+    val focalPx: Double get() = sqrt(focalXPx * focalYPx)
+
     companion object {
-        /** Intrinsics of a [widthPx] × [heightPx] frame covering the given angles. */
+        /**
+         * Intrinsics of a [widthPx] × [heightPx] frame covering the given
+         * angles, with [radial] already in this frame's pixel space.
+         *
+         * Prefer [forLens] when the coefficients come from the camera — it does
+         * the conversion from the unitless polynomial for you, against the
+         * focal length these very intrinsics imply.
+         */
         fun fromFieldOfView(
             widthPx: Int,
             heightPx: Int,
@@ -222,8 +239,64 @@ data class FrameIntrinsics(
             )
         }
 
+        /**
+         * Intrinsics for a frame shot through [distortion].
+         *
+         * The lens's unitless coefficients are converted against the focal
+         * length this frame implies, which is what makes the conversion correct
+         * at whatever size the frame happened to be decoded to.
+         */
+        fun forLens(
+            widthPx: Int,
+            heightPx: Int,
+            horizontalFovDegrees: Float,
+            verticalFovDegrees: Float,
+            distortion: RadialDistortion?,
+        ): FrameIntrinsics {
+            val pinhole = fromFieldOfView(
+                widthPx = widthPx,
+                heightPx = heightPx,
+                horizontalFovDegrees = horizontalFovDegrees,
+                verticalFovDegrees = verticalFovDegrees,
+            )
+            val radial = distortion?.pixelCoefficientsFor(pinhole.focalPx) ?: return pinhole
+            return pinhole.copy(radial = radial)
+        }
+
         private fun tanHalf(degrees: Float): Double = tan(Math.toRadians(degrees / 2.0))
     }
+}
+
+/**
+ * Blend weight for a pixel that landed at ([idealColumn], [idealRow]) in a
+ * frame, 0 at the border and 1 on the optical axis.
+ *
+ * This is the feather that turns an overlap into a cross-fade. It is measured
+ * against the *ideal* (pinhole) pixel rather than the distorted one because the
+ * ideal offset is proportional to the angle off the optical axis, which is what
+ * "how squarely did this frame see that direction" actually means.
+ *
+ * Both factors are clamped at zero before they meet: radial distortion can pull
+ * a pixel whose ideal position is outside the frame back inside the distorted
+ * bounds, and two negative factors would otherwise multiply into a *positive*
+ * weight for a direction the frame never really saw. Raised to a power so the
+ * frame that sees a shared direction most head-on wins the blend rather than
+ * smearing it across a wide linear cross-fade.
+ */
+internal fun featherWeight(
+    idealColumn: Double,
+    idealRow: Double,
+    centreX: Double,
+    centreY: Double,
+): Double {
+    val across = 1.0 - abs(idealColumn - centreX) / centreX
+    if (across <= 0.0) return 0.0
+    val down = 1.0 - abs(idealRow - centreY) / centreY
+    if (down <= 0.0) return 0.0
+    val linear = across * down
+    // Cubed by hand: this runs once per canvas pixel per frame, where a
+    // `Math.pow` call is several times the cost of two multiplies.
+    return linear * linear * linear
 }
 
 /**
@@ -559,3 +632,39 @@ internal fun wrapColumn(column: Int, width: Int): Int {
     val remainder = column % width
     return if (remainder < 0) remainder + width else remainder
 }
+
+/**
+ * How much two aims overlap, or null when they do not.
+ *
+ * The second camera's aim is projected into the first's camera frame and must
+ * land within one field of view on both axes — the condition for two
+ * axis-aligned field-of-view windows to intersect, since two frames each
+ * reaching half a field of view either side of their aim meet exactly when
+ * their aims are less than one full field of view apart. The returned value is
+ * the squared angular separation (tangent-space), so a smaller value is a
+ * stronger shared view, which is how the pose graph orders its edges.
+ */
+internal fun angularOverlap(
+    a: CameraBasis,
+    b: CameraBasis,
+    horizontalFovDegrees: Float,
+    verticalFovDegrees: Float,
+): Double? {
+    val depth = a.depthOf(b.forwardX, b.forwardY, b.forwardZ)
+    if (depth <= MIN_DEPTH) return null
+    val horizontalSeparation = abs(a.lateralOf(b.forwardX, b.forwardY, b.forwardZ) / depth)
+    val verticalSeparation = abs(a.verticalOf(b.forwardX, b.forwardY, b.forwardZ) / depth)
+    if (horizontalSeparation >= tanOf(horizontalFovDegrees)) return null
+    if (verticalSeparation >= tanOf(verticalFovDegrees)) return null
+    return horizontalSeparation * horizontalSeparation + verticalSeparation * verticalSeparation
+}
+
+/**
+ * `tan(degrees)`, saturating at a right angle.
+ *
+ * A field of view of 90° or more spans the whole half-space in that axis, where
+ * the tangent flips sign and would reject every pair; the overlap test wants
+ * "no bound at all" instead.
+ */
+private fun tanOf(degrees: Float): Double =
+    if (degrees >= 90f) Double.MAX_VALUE else tan(Math.toRadians(degrees.toDouble()))
