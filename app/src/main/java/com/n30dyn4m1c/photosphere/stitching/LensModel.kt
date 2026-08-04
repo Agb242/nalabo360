@@ -13,40 +13,53 @@ package com.n30dyn4m1c.photosphere.stitching
  * y_d = y_i * (1 + k1 r^2 + k2 r^4 + k3 r^6)
  * ```
  *
- * with r^2 = x_i^2 + y_i^2 and both coordinates measured in pixels from the
- * optical centre. [coefficients] holds `[k1, k2, k3]` in that order, calibrated
- * on the sensor whose longest edge is [calibrationLongestEdgePx]. The tangential
- * terms of the full model are dropped: they are tiny on phone lenses, and their
- * coordinate normalization is the part the API documents inconsistently, while
- * the radial terms carry almost all of the seam error at frame borders.
+ * with r^2 = x_i^2 + y_i^2. The coefficients are **unitless** and the
+ * coordinates they act on are measured in a normalized space: the origin is the
+ * optical centre, and the axes are scaled so the *farthest* edge of the
+ * calibration array sits at ±1 (so |r| never exceeds √2). This is what makes
+ * the polynomial resolution-independent — a phone's ~66° lens reports k1 on the
+ * order of −0.02 regardless of whether the sensor is 12 MP or 50 MP.
+ *
+ * [coefficients] holds `[k1, k2, k3]` in that order, and
+ * [calibrationLongestEdgePx] records the edge the normalized space was defined
+ * against (kept so the calibration can be sanity-checked). The tangential terms
+ * of the full model are dropped: they are tiny on phone lenses, and the radial
+ * terms carry almost all of the seam error at frame borders.
  *
  * Every pipeline stage applies the same model in the same pixel space as the
  * frame it is looking at — the renderer samples through it, the footprint walks
  * the distorted border, and pose refinement undistorts keypoints — so a
- * direction, its ideal pixel and its distorted pixel always agree.
+ * direction, its ideal pixel and its distorted pixel always agree. [effectiveFor]
+ * is what converts the unitless polynomial into that pixel space.
  */
 class RadialDistortion(
-    /** `[k1, k2, k3]` at the calibration scale. */
+    /** Unitless `[k1, k2, k3]`, applied to normalized coordinates (edge = ±1). */
     val coefficients: DoubleArray,
-    /** Longest sensor edge the coefficients were calibrated at, in pixels. */
+    /** Longest sensor edge the normalized coordinate space was defined against, in pixels. */
     val calibrationLongestEdgePx: Int,
 ) {
     /**
      * The same distortion re-expressed for a frame whose longest edge is
      * [decodedLongestEdgePx].
      *
-     * A uniform downsample by `s` shrinks every pixel offset by `s`, so r^2
-     * shrinks by s^2 and each coefficient of the polynomial in r^2 rescales by
-     * s^(2·order): k1 by s^2, k2 by s^4, k3 by s^6.
+     * A pixel offset `p` maps to the normalized offset `p / (edge/2)`, so the
+     * polynomial in normalized r² becomes one in pixel r² with each term
+     * divided by `(edge/2)^(2·order)`: k1 by h², k2 by h⁴, k3 by h⁶, where
+     * `h = decodedLongestEdgePx / 2`. The result is what [distortPixel] and
+     * [undistortPixel] expect: coefficients that take r² in pixels.
      */
     fun effectiveFor(decodedLongestEdgePx: Int): DoubleArray? {
-        if (coefficients.isEmpty() || calibrationLongestEdgePx <= 0) return null
-        val scale = calibrationLongestEdgePx.toDouble() / decodedLongestEdgePx
-        val s2 = scale * scale
+        if (coefficients.isEmpty() || calibrationLongestEdgePx <= 0 || decodedLongestEdgePx <= 0) {
+            return null
+        }
+        val halfExtent = decodedLongestEdgePx / 2.0
+        val h2 = halfExtent * halfExtent
+        val h4 = h2 * h2
+        val h6 = h2 * h2 * h2
         return doubleArrayOf(
-            coefficients[0] * s2,
-            coefficients[1] * s2 * s2,
-            coefficients[2] * s2 * s2 * s2,
+            coefficients[0] / h2,
+            coefficients[1] / h4,
+            coefficients[2] / h6,
         )
     }
 }
