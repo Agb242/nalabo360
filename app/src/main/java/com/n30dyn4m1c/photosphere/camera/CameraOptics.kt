@@ -190,6 +190,19 @@ internal fun estimateSphereOptics(
                 }
 
                 sensorFieldOfView = reconcileFieldOfView(fromIntrinsics, fromGeometry)
+                if (fromIntrinsics != null && fromGeometry != null &&
+                    sensorFieldOfView !== fromIntrinsics
+                ) {
+                    // Worth a warning of its own: this is the case that used to
+                    // space the capture plan past any overlap at all, and it is
+                    // the first thing to look for in a run that would not stitch.
+                    Log.w(
+                        TAG,
+                        "Camera $id calibration claims ${fromIntrinsics.horizontalDegrees}° " +
+                            "where its sensor geometry says ${fromGeometry.horizontalDegrees}°; " +
+                            "trusting the geometry",
+                    )
+                }
                 if (array != null) {
                     sensorFieldOfView = croppedToStreamAspect(
                         sensor = sensorFieldOfView,
@@ -276,6 +289,9 @@ private fun SizeF?.diagonalMm(): Float =
  * both be describing this lens, and the geometry is what survives: a focal
  * length in millimetres over a sensor size in millimetres has no crop to be
  * quoted against and therefore no way to be off by a factor.
+ *
+ * Deliberately free of any framework call, logging included, so the decision
+ * can be exercised in a local unit test. The caller says what was discarded.
  */
 internal fun reconcileFieldOfView(
     fromIntrinsics: FieldOfView?,
@@ -286,13 +302,6 @@ internal fun reconcileFieldOfView(
 
     val ratio = fromIntrinsics.horizontalDegrees / fromGeometry.horizontalDegrees
     val agrees = ratio <= MAX_ESTIMATE_DISAGREEMENT && ratio >= 1f / MAX_ESTIMATE_DISAGREEMENT
-    if (!agrees) {
-        Log.w(
-            TAG,
-            "Calibration claims ${fromIntrinsics.horizontalDegrees}° where the sensor " +
-                "geometry says ${fromGeometry.horizontalDegrees}°; trusting the geometry",
-        )
-    }
     return if (agrees) fromIntrinsics else fromGeometry
 }
 
