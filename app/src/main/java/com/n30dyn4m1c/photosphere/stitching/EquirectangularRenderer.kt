@@ -5,6 +5,7 @@ import org.opencv.core.CvType
 import org.opencv.core.Mat
 import org.opencv.core.Rect
 import org.opencv.core.Scalar
+import org.opencv.core.Size
 import org.opencv.imgproc.Imgproc
 import kotlin.math.cos
 import kotlin.math.max
@@ -33,32 +34,27 @@ internal class PreparedFrame(
  * through by depth, which gives the pixel of the frame that looked at it — the
  * inverse of the projection the lens performed. `remap` then does the sampling.
  *
- * Where frames overlap, the result is a weighted mean rather than whichever
- * frame was painted last. The weight falls to zero at each frame's border, so a
- * pixel near the edge of one frame and the middle of its neighbour takes almost
- * all of its colour from the neighbour, and the seam becomes a cross-fade
- * instead of a line. A pixel only one frame reached still comes out at full
- * strength: the weight divides out.
+ * Where frames overlap, the result is a multi-band blend rather than whichever
+ * frame was painted last. The feather weight becomes each frame's mask, and the
+ * mask and the frame are each split into a Laplacian/Gaussian pyramid: fine
+ * detail is faded across a narrow cross-fade, broad illumination across a wide
+ * one, so a seam that survives one band does not survive the one that carried
+ * it. See [MultibandBlender] for the maths.
  *
- * **Memory.** A 4096-wide canvas needs 100 MB of float accumulator if it is held
- * all at once, which is exactly the kind of allocation that ends a stitch on a
- * mid-range phone. The canvas is therefore built in horizontal bands: only the
- * band being accumulated exists in float, and each frame contributes to a band
- * through the intersection of the band with its own footprint. The total work is
- * unchanged — every frame still touches each of its pixels once — but the peak
- * is a few megabytes instead of a hundred.
+ * **Memory.** A 4096-wide canvas needs 100 MB of float accumulator if it is
+ * held all at once, which is exactly the kind of allocation that ends a stitch
+ * on a mid-range phone. Every level is therefore built in horizontal bands:
+ * only the band being accumulated exists in float, and each frame contributes
+ * through the intersection of the band with its own footprint. The coarser
+ * levels, which carry the wide cross-fade, live in mats a fraction of the
+ * canvas. The total work is unchanged — every frame still touches each of its
+ * pixels once at every level — but the peak is tens of megabytes rather than a
+ * hundred.
  */
 internal object EquirectangularRenderer {
 
     /** Rows accumulated at once. Sets the renderer's peak memory, with the width. */
     private const val BAND_HEIGHT = 128
-
-    /**
-     * Added to the weight before dividing, so an uncovered pixel divides 0 by a
-     * small number rather than 0 by 0. Small enough not to darken real pixels,
-     * whose weights are orders of magnitude larger.
-     */
-    private const val WEIGHT_EPSILON = 1e-6
 
     /** What a render produced, and how much of the sphere it reached. */
     class Rendered(
@@ -73,10 +69,10 @@ internal object EquirectangularRenderer {
      *
      * [gains], when given, holds one brightness multiplier per frame, aligned by
      * position with [frames]; it is applied before the overlaps are blended so
-     * the exposure compensation lands inside the mean rather than on top of it.
-     * [onBandComplete] is called with the number of bands finished so far and
-     * the total, for progress reporting; [checkCancelled] is called at every band
-     * boundary and may throw to abandon the render.
+     * the exposure compensation lands inside the blend rather than on top of
+     * it. [onBandComplete] is called with the number of units finished so far
+     * and the total, for progress reporting; [checkCancelled] is called at
+     * every band and level boundary and may throw to abandon the render.
      *
      * [pivotRatio] is [PivotModel.ratio]: how far the lens sat from the axis the
      * user turned about, as a fraction of the scene's distance. Zero treats the
@@ -103,33 +99,243 @@ internal object EquirectangularRenderer {
     ): Rendered {
         val canvas = Mat.zeros(canvasHeight, canvasWidth, CvType.CV_8UC3)
         var coveredPixels = 0L
-        val bandCount = (canvasHeight + BAND_HEIGHT - 1) / BAND_HEIGHT
         // One set of scratch buffers for the whole render. A pole-covering frame
         // reaches the full canvas width, so a per-segment allocation would churn
         // tens of megabytes of float array per band across forty frames.
         val scratch = SegmentScratch()
 
+        // Progress is reported in roughly uniform units: one per coarse level,
+        // one per band of the coarsest two levels' reconstruction. The single
+        // level below, if there is one, just swaps the units.
+        val levelCount = MultibandBlender.levelCountFor(canvasHeight)
+        val levelOneBandCount = if (levelCount >= 3) {
+            val heightOne = MultibandBlender.levelSize(canvasWidth, canvasHeight, 1).second
+            (heightOne + BAND_HEIGHT - 1) / BAND_HEIGHT
+        } else 0
+        val levelZeroBandCount = (canvasHeight + BAND_HEIGHT - 1) / BAND_HEIGHT
+        val progressTotal = (levelCount - 1) + levelOneBandCount + levelZeroBandCount
+        var progressDone = 0
+
         try {
-            for (band in 0 until bandCount) {
-                checkCancelled()
-                val bandTop = band * BAND_HEIGHT
-                val bandHeight = min(BAND_HEIGHT, canvasHeight - bandTop)
-                coveredPixels += renderBand(
-                    frames = frames,
-                    canvas = canvas,
-                    canvasWidth = canvasWidth,
-                    canvasHeight = canvasHeight,
-                    bandTop = bandTop,
-                    bandHeight = bandHeight,
-                    gains = gains,
-                    pivotRatio = pivotRatio,
-                    longitudeSpanDegrees = longitudeSpanDegrees,
-                    centerLongitudeDegrees = centerLongitudeDegrees,
-                    latitudeSpanDegrees = latitudeSpanDegrees,
-                    centerLatitudeDegrees = centerLatitudeDegrees,
-                    scratch = scratch,
+            if (levelCount <= 1) {
+                // Degenerate canvas (shorter than the coarsest band): the
+                // multi-band split has nowhere to go, so this is the plain
+                // normalised mean the blend reduces to with a single level.
+                for (band in 0 until levelZeroBandCount) {
+                    checkCancelled()
+                    val bandTop = band * BAND_HEIGHT
+                    val bandHeight = min(BAND_HEIGHT, canvasHeight - bandTop)
+                    val color = Mat.zeros(bandHeight, canvasWidth, CvType.CV_32FC3)
+                    val weight = Mat.zeros(bandHeight, canvasWidth, CvType.CV_32FC1)
+                    try {
+                        accumulateLevel(
+                            frames = frames,
+                            colorSum = color,
+                            weightSum = weight,
+                            canvasWidth = canvasWidth,
+                            canvasHeight = canvasHeight,
+                            bandTop = bandTop,
+                            bandHeight = bandHeight,
+                            sourceScale = 1,
+                            gains = gains,
+                            pivotRatio = pivotRatio,
+                            longitudeSpanDegrees = longitudeSpanDegrees,
+                            centerLongitudeDegrees = centerLongitudeDegrees,
+                            latitudeSpanDegrees = latitudeSpanDegrees,
+                            centerLatitudeDegrees = centerLatitudeDegrees,
+                            scratch = scratch,
+                        )
+                        coveredPixels += Core.countNonZero(weight)
+                        val normalized = MultibandBlender.normalizeColor(color, weight)
+                        val region = canvas.submat(Rect(0, bandTop, canvasWidth, bandHeight))
+                        try {
+                            normalized.convertTo(region, CvType.CV_8UC3)
+                        } finally {
+                            region.release()
+                        }
+                        normalized.release()
+                    } finally {
+                        color.release()
+                        weight.release()
+                    }
+                    progressDone++
+                    onBandComplete(progressDone, progressTotal)
+                }
+            } else {
+                val coarse = ArrayList<MultibandBlender.PyramidLevel>(levelCount - 1)
+
+                // -- Level accumulation --------------------------------------
+                // Levels 1..L accumulate over their whole (small) canvas. Level
+                // 0 accumulates band by band, later, once its coarser content
+                // has been rebuilt.
+                for (level in 1 until levelCount) {
+                    checkCancelled()
+                    val (width, height) = MultibandBlender.levelSize(canvasWidth, canvasHeight, level)
+                    val color = Mat.zeros(height, width, CvType.CV_32FC3)
+                    val weight = Mat.zeros(height, width, CvType.CV_32FC1)
+                    accumulateLevel(
+                        frames = frames,
+                        colorSum = color,
+                        weightSum = weight,
+                        canvasWidth = width,
+                        canvasHeight = height,
+                        bandTop = 0,
+                        bandHeight = height,
+                        sourceScale = 1 shl level,
+                        gains = gains,
+                        pivotRatio = pivotRatio,
+                        longitudeSpanDegrees = longitudeSpanDegrees,
+                        centerLongitudeDegrees = centerLongitudeDegrees,
+                        latitudeSpanDegrees = latitudeSpanDegrees,
+                        centerLatitudeDegrees = centerLatitudeDegrees,
+                        scratch = scratch,
+                    )
+                    coarse += MultibandBlender.PyramidLevel(color, weight)
+                    progressDone++
+                    onBandComplete(progressDone, progressTotal)
+                }
+
+                // -- Coarse reconstruction ------------------------------------
+                // Levels L down to 2 rebuild whole-canvas; they are small, and
+                // the bands they expand into are a fraction of the canvas.
+                var acc = MultibandBlender.normalizeColor(
+                    coarse[levelCount - 2].color,
+                    coarse[levelCount - 2].weight,
                 )
-                onBandComplete(band + 1, bandCount)
+                for (level in (levelCount - 2) downTo 2) {
+                    checkCancelled()
+                    val (width, height) = MultibandBlender.levelSize(canvasWidth, canvasHeight, level)
+                    val (coarseWidth, coarseHeight) =
+                        MultibandBlender.levelSize(canvasWidth, canvasHeight, level + 1)
+                    val next = MultibandBlender.reconstructBand(
+                        colorBand = coarse[level - 1].color,
+                        weightBand = coarse[level - 1].weight,
+                        coarseAcc = acc,
+                        coarseColor = coarse[level].color,
+                        coarseWeight = coarse[level].weight,
+                        canvasWidth = width,
+                        canvasHeight = height,
+                        coarseWidth = coarseWidth,
+                        coarseHeight = coarseHeight,
+                        bandTop = 0,
+                        bandHeight = height,
+                    )
+                    acc.release()
+                    acc = next
+                    // The level this iteration just folded in (level 3 or up) is
+                    // spent; level 2 is still needed by the level-1 bands, and
+                    // level 1 by the canvas.
+                    coarse[level].release()
+                }
+                // acc is now level 2's reconstruction; coarse[1] holds level
+                // 2's colour sum and coarse[0] level 1's sums. A canvas that
+                // split into only two levels has no level 2, and acc already is
+                // level 1's reconstruction.
+
+                // -- Level-1 reconstruction, banded --------------------------
+                val (levelOneWidth, levelOneHeight) =
+                    MultibandBlender.levelSize(canvasWidth, canvasHeight, 1)
+                val levelOneAcc: Mat
+                if (levelCount >= 3) {
+                    val (levelTwoWidth, levelTwoHeight) =
+                        MultibandBlender.levelSize(canvasWidth, canvasHeight, 2)
+                    levelOneAcc = Mat.zeros(levelOneHeight, levelOneWidth, CvType.CV_32FC3)
+                    for (band in 0 until levelOneBandCount) {
+                        checkCancelled()
+                        val bandTop = band * BAND_HEIGHT
+                        val bandHeight = min(BAND_HEIGHT, levelOneHeight - bandTop)
+                        val colorBand = coarse[0].color.submat(Rect(0, bandTop, levelOneWidth, bandHeight))
+                        val weightBand = coarse[0].weight.submat(Rect(0, bandTop, levelOneWidth, bandHeight))
+                        val target = levelOneAcc.submat(Rect(0, bandTop, levelOneWidth, bandHeight))
+                        val band = MultibandBlender.reconstructBand(
+                            colorBand = colorBand,
+                            weightBand = weightBand,
+                            coarseAcc = acc,
+                            coarseColor = coarse[1].color,
+                            coarseWeight = coarse[1].weight,
+                            canvasWidth = levelOneWidth,
+                            canvasHeight = levelOneHeight,
+                            coarseWidth = levelTwoWidth,
+                            coarseHeight = levelTwoHeight,
+                            bandTop = bandTop,
+                            bandHeight = bandHeight,
+                        )
+                        try {
+                            band.copyTo(target)
+                        } finally {
+                            band.release()
+                            colorBand.release()
+                            weightBand.release()
+                            target.release()
+                        }
+                        progressDone++
+                        onBandComplete(progressDone, progressTotal)
+                    }
+                    // The level-2 content has done its job; level 1's weight sum
+                    // is still needed by the level-0 bands below.
+                    acc.release()
+                    coarse[1].release()
+                } else {
+                    // Two levels only: acc already is level 1's reconstruction.
+                    levelOneAcc = acc
+                }
+
+                // -- Level-0 reconstruction, banded, into the canvas ----------
+                for (band in 0 until levelZeroBandCount) {
+                    checkCancelled()
+                    val bandTop = band * BAND_HEIGHT
+                    val bandHeight = min(BAND_HEIGHT, canvasHeight - bandTop)
+                    val color = Mat.zeros(bandHeight, canvasWidth, CvType.CV_32FC3)
+                    val weight = Mat.zeros(bandHeight, canvasWidth, CvType.CV_32FC1)
+                    try {
+                        accumulateLevel(
+                            frames = frames,
+                            colorSum = color,
+                            weightSum = weight,
+                            canvasWidth = canvasWidth,
+                            canvasHeight = canvasHeight,
+                            bandTop = bandTop,
+                            bandHeight = bandHeight,
+                            sourceScale = 1,
+                            gains = gains,
+                            pivotRatio = pivotRatio,
+                            longitudeSpanDegrees = longitudeSpanDegrees,
+                            centerLongitudeDegrees = centerLongitudeDegrees,
+                            latitudeSpanDegrees = latitudeSpanDegrees,
+                            centerLatitudeDegrees = centerLatitudeDegrees,
+                            scratch = scratch,
+                        )
+                        coveredPixels += Core.countNonZero(weight)
+                        val band = MultibandBlender.reconstructBand(
+                            colorBand = color,
+                            weightBand = weight,
+                            coarseAcc = levelOneAcc,
+                            coarseColor = coarse[0].color,
+                            coarseWeight = coarse[0].weight,
+                            canvasWidth = canvasWidth,
+                            canvasHeight = canvasHeight,
+                            coarseWidth = levelOneWidth,
+                            coarseHeight = levelOneHeight,
+                            bandTop = bandTop,
+                            bandHeight = bandHeight,
+                        )
+                        val region = canvas.submat(Rect(0, bandTop, canvasWidth, bandHeight))
+                        try {
+                            band.convertTo(region, CvType.CV_8UC3)
+                        } finally {
+                            region.release()
+                        }
+                        band.release()
+                    } finally {
+                        color.release()
+                        weight.release()
+                    }
+                    progressDone++
+                    onBandComplete(progressDone, progressTotal)
+                }
+                levelOneAcc.release()
+                coarse[0].color.release()
+                coarse[0].weight.release()
             }
         } catch (e: Throwable) {
             canvas.release()
@@ -140,14 +346,26 @@ internal object EquirectangularRenderer {
         return Rendered(canvas, coverage = (coveredPixels.toDouble() / total).toFloat())
     }
 
-    /** Accumulates every frame that reaches one band, and writes it into [canvas]. */
-    private fun renderBand(
+    /**
+     * Accumulates every frame that reaches one band of one pyramid level into
+     * [colorSum] and [weightSum].
+     *
+     * [canvasWidth]/[canvasHeight] are the *level's* canvas size and
+     * [bandTop]/[bandHeight] the band within it (the whole canvas for levels
+     * above the finest). [sourceScale] is `2^level`: at level 0 it is 1 and
+     * the frames are sampled whole; above that each frame is downsampled to a
+     * quarter the area first, so the warp lands on the level's coarse Gaussian
+     * rather than a decimated copy of the full-res one.
+     */
+    private fun accumulateLevel(
         frames: List<PreparedFrame>,
-        canvas: Mat,
+        colorSum: Mat,
+        weightSum: Mat,
         canvasWidth: Int,
         canvasHeight: Int,
         bandTop: Int,
         bandHeight: Int,
+        sourceScale: Int,
         gains: FloatArray?,
         pivotRatio: Double,
         longitudeSpanDegrees: Float,
@@ -155,19 +373,35 @@ internal object EquirectangularRenderer {
         latitudeSpanDegrees: Float,
         centerLatitudeDegrees: Float,
         scratch: SegmentScratch,
-    ): Long {
-        val colorSum = Mat.zeros(bandHeight, canvasWidth, CvType.CV_32FC3)
-        val weightSum = Mat.zeros(bandHeight, canvasWidth, CvType.CV_32FC1)
-        try {
-            for (frameIndex in frames.indices) {
-                val frame = frames[frameIndex]
-                val footprint = frame.footprint
-                if (footprint.isEmpty) continue
+    ) {
+        val divisor = sourceScale.toDouble()
+        val interpolation =
+            if (sourceScale == 1) Imgproc.INTER_LANCZOS4 else Imgproc.INTER_LINEAR
+        for (frameIndex in frames.indices) {
+            val frame = frames[frameIndex]
+            val footprint = scaleFootprint(frame.footprint, sourceScale)
+            if (footprint.isEmpty) continue
 
-                val rowStart = max(bandTop, footprint.startRow)
-                val rowEnd = min(bandTop + bandHeight, footprint.startRow + footprint.rowSpan)
-                if (rowEnd <= rowStart) continue
+            val rowStart = max(bandTop, footprint.startRow)
+            val rowEnd = min(bandTop + bandHeight, footprint.startRow + footprint.rowSpan)
+            if (rowEnd <= rowStart) continue
 
+            val ownsSource = sourceScale > 1
+            val source = if (ownsSource) {
+                val downsampled = Mat()
+                Imgproc.resize(
+                    frame.image, downsampled,
+                    Size(
+                        (frame.intrinsics.widthPx / sourceScale).coerceAtLeast(1).toDouble(),
+                        (frame.intrinsics.heightPx / sourceScale).coerceAtLeast(1).toDouble(),
+                    ),
+                    0.0, 0.0, Imgproc.INTER_AREA,
+                )
+                downsampled
+            } else {
+                frame.image
+            }
+            try {
                 forEachColumnRun(
                     footprint,
                     canvasWidth,
@@ -175,6 +409,9 @@ internal object EquirectangularRenderer {
                 ) { canvasColumn, columnSpan ->
                     accumulateSegment(
                         frame = frame,
+                        source = source,
+                        sourceDivisor = divisor,
+                        interpolation = interpolation,
                         colorSum = colorSum,
                         weightSum = weightSum,
                         canvasWidth = canvasWidth,
@@ -193,14 +430,9 @@ internal object EquirectangularRenderer {
                         scratch = scratch,
                     )
                 }
+            } finally {
+                if (ownsSource) source.release()
             }
-
-            val covered = Core.countNonZero(weightSum).toLong()
-            writeBand(colorSum, weightSum, canvas, bandTop, bandHeight, canvasWidth)
-            return covered
-        } finally {
-            colorSum.release()
-            weightSum.release()
         }
     }
 
@@ -211,9 +443,18 @@ internal object EquirectangularRenderer {
      * only across columns and latitude only down rows — so the per-column parts
      * are computed once for the whole rectangle and the inner loop is left with
      * a couple of multiplies per pixel.
+     *
+     * [source] is the frame's image, either whole ([sourceDivisor] 1) or
+     * downsampled by [sourceDivisor] — the map coordinates are divided by it so
+     * they land in the right pixels either way. The feather weight is measured
+     * against the *ideal* (pinhole) pixel at full resolution, which is
+     * scale-invariant.
      */
     private fun accumulateSegment(
         frame: PreparedFrame,
+        source: Mat,
+        sourceDivisor: Double,
+        interpolation: Int,
         colorSum: Mat,
         weightSum: Mat,
         canvasWidth: Int,
@@ -296,7 +537,7 @@ internal object EquirectangularRenderer {
                 if (depth <= MIN_DEPTH) {
                     // Behind the camera. A map coordinate outside the source
                     // makes remap emit the border colour, and the zero weight
-                    // keeps it out of the mean regardless.
+                    // keeps it out of the blend regardless.
                     mapX[index] = -1f
                     mapY[index] = -1f
                     weights[index] = 0f
@@ -332,8 +573,8 @@ internal object EquirectangularRenderer {
                     continue
                 }
 
-                mapX[index] = sourceColumn.toFloat()
-                mapY[index] = sourceRow.toFloat()
+                mapX[index] = (sourceColumn / sourceDivisor).toFloat()
+                mapY[index] = (sourceRow / sourceDivisor).toFloat()
                 val weight = featherWeight(idealColumn, idealRow, centreX, centreY)
                 weights[index] = weight.toFloat()
                 if (weight > 0.0) anyCovered = true
@@ -357,15 +598,17 @@ internal object EquirectangularRenderer {
             mapYMat.put(0, 0, mapY)
             weightMat.put(0, 0, weights)
 
-            // Lanczos rather than linear: the canvas is now often rendered
-            // close to the frames' own resolution, and the sharper kernel keeps
-            // the edge detail that a linear filter would soften.
+            // Lanczos on the finest level, linear above it: the canvas is now
+            // often rendered close to the frames' own resolution, and the
+            // sharper kernel keeps the edge detail that a linear filter would
+            // soften. Coarse levels sample an already-downsampled source, where
+            // linear is all there is to keep.
             Imgproc.remap(
-                frame.image,
+                source,
                 warped,
                 mapXMat,
                 mapYMat,
-                Imgproc.INTER_LANCZOS4,
+                interpolation,
                 Core.BORDER_CONSTANT,
                 Scalar(0.0, 0.0, 0.0),
             )
@@ -396,36 +639,26 @@ internal object EquirectangularRenderer {
         }
     }
 
-    /** Divides the accumulated colour by its weight and stores the band. */
-    private fun writeBand(
-        colorSum: Mat,
-        weightSum: Mat,
-        canvas: Mat,
-        bandTop: Int,
-        bandHeight: Int,
-        canvasWidth: Int,
-    ) {
-        val safeWeight = Mat()
-        val weight3 = Mat()
-        val normalized = Mat()
-        try {
-            // Uncovered pixels hold a zero colour sum, so dividing by the epsilon
-            // leaves them black rather than producing a NaN.
-            Core.add(weightSum, Scalar(WEIGHT_EPSILON), safeWeight)
-            Core.merge(listOf(safeWeight, safeWeight, safeWeight), weight3)
-            Core.divide(colorSum, weight3, normalized)
-
-            val region = canvas.submat(Rect(0, bandTop, canvasWidth, bandHeight))
-            try {
-                normalized.convertTo(region, CvType.CV_8UC3)
-            } finally {
-                region.release()
-            }
-        } finally {
-            safeWeight.release()
-            weight3.release()
-            normalized.release()
-        }
+    /**
+     * A footprint in level-[scale] (power-of-two) canvas coordinates.
+     *
+     * The level-0 footprint is divided by [scale] with the bounds pushed out a
+     * row and a column, so the coarse warp never misses a border the sampled
+     * footprint was one pixel short of — the projection's own bounds check
+     * trims any overreach.
+     */
+    internal fun scaleFootprint(footprint: CanvasFootprint, scale: Int): CanvasFootprint {
+        if (scale <= 1) return footprint
+        val startColumn = Math.floorDiv(footprint.startColumn, scale) - 1
+        val endColumn = Math.floorDiv(footprint.startColumn + footprint.columnSpan - 1, scale) + 2
+        val startRow = Math.floorDiv(footprint.startRow, scale) - 1
+        val endRow = Math.floorDiv(footprint.startRow + footprint.rowSpan - 1, scale) + 2
+        return CanvasFootprint(
+            startColumn = startColumn,
+            columnSpan = endColumn - startColumn,
+            startRow = startRow,
+            rowSpan = endRow - startRow,
+        )
     }
 
     /**
@@ -464,12 +697,12 @@ internal object EquirectangularRenderer {
     /**
      * Grow-only working buffers for one segment's projection.
      *
-     * A render walks every frame across every band, and each visit needs three
-     * float arrays the size of the rectangle it is painting plus three the width
-     * of it. Allocating those per visit is tens of megabytes of short-lived
-     * array per band on a wide canvas — enough garbage to stall a stitch on a
-     * mid-range phone. The buffers are only ever grown, so after the first few
-     * segments the render allocates nothing at all.
+     * A render walks every frame across every band and level, and each visit
+     * needs three float arrays the size of the rectangle it is painting plus
+     * three the width of it. Allocating those per visit is tens of megabytes of
+     * short-lived array per band on a wide canvas — enough garbage to stall a
+     * stitch on a mid-range phone. The buffers are only ever grown, so after
+     * the first few segments the render allocates nothing at all.
      *
      * Confined to the rendering thread; a render is single-threaded by
      * construction, and one scratch is created per [render] call.

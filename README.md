@@ -199,6 +199,7 @@ app/src/main/java/com/n30dyn4m1c/photosphere/
 ├── stitching/
 │   ├── PhotoSphereStitcher.kt   # the stitch: read, render, statuses, progress
 │   ├── SphericalGeometry.kt     # camera basis, canvas mapping, frame footprints
+│   ├── MultibandBlender.kt      # Laplacian-pyramid blend: levels, reconstruction
 │   └── EquirectangularRenderer.kt # projecting frames onto the sphere, blending
 ├── metadata/
 │   └── GPanoXmpInjector.kt      # GPano XMP into the JPEG header, no re-encode
@@ -518,11 +519,15 @@ out to the full width, because every longitude passes underneath it.
 does the painting. Every output pixel is a direction; for each frame that
 direction is rotated into the frame's own axes and divided through by depth,
 which gives the pixel that looked at it (through the distortion model), and
-`Imgproc.remap` samples it. The exposure gains are applied before the mean, so
-they land inside the blend. Overlaps resolve to a weighted mean whose weight
-falls to zero at each frame's border, so a seam becomes a cross-fade rather than
-a line — and a pixel only one frame reached still comes out at full strength,
-because the weight divides back out.
+`Imgproc.remap` samples it. The exposure gains are applied before the blend, so
+they land inside it. Overlaps resolve to a multi-band (Laplacian pyramid)
+blend — see [`MultibandBlender`](app/src/main/java/com/n30dyn4m1c/photosphere/stitching/MultibandBlender.kt).
+Each frame and its feather mask are split into bands, and each band is
+cross-faded with a mask sized to the band: fine detail fades across a few
+pixels, broad illumination across the whole overlap, so a seam is faded at
+every scale by a transition narrower than the detail that scale carries. A
+pixel only one frame reached still comes out at full strength, because its
+mask divides back out.
 
 The result is equirectangular *by construction* rather than by cropping
 something else into shape: a pixel's row is its latitude, so an incomplete sphere
@@ -534,11 +539,13 @@ doubling.
 
 **Memory.** A 4096-wide canvas needs 100 MB of float accumulator if it is held
 at once, which is exactly the allocation that ends a stitch on a mid-range
-phone. The canvas is built in horizontal bands instead, so only the band being
-accumulated exists in float and the peak is a few megabytes. The canvas is also
-never rendered wider than the frames justify — a 1024 px frame across 66° carries
-about 15.5 px per degree, so a full turn is worth ~5600 px, and rendering beyond
-that would only interpolate.
+phone. Every level of the blend is built in horizontal bands instead, so only
+the band being accumulated exists in float, and the coarse levels that carry
+the wide cross-fade live in mats a small fraction of the canvas — the peak is
+tens of megabytes rather than a hundred, the same order as the unsharp mask
+that runs after it. The canvas is also never rendered wider than the frames
+justify — a 1024 px frame across 66° carries about 15.5 px per degree, so a
+full turn is worth ~5600 px, and rendering beyond that would only interpolate.
 
 **The field of view is self-checked.** The angles handed to the stitcher describe
 the upright frame as captured on the portrait-locked display, and `stitchPhotos`
@@ -618,10 +625,9 @@ read grant attached.
   intrinsic calibration — but solving for a small per-frame focal correction
   alongside the rotations (Brown & Lowe's step) would absorb the last bit of
   scale error a loosely-described lens leaves behind.
-- **Multi-band blending.** The feathered weighted mean hides a residual pose
-  error well, but at high contrast (a dark doorway against a bright wall) a
-  Laplacian-pyramid blend would hide it better. That is a larger renderer
-  change, and the sharper the refined poses are, the less the seams need it.
+- **Multi-band blending** is implemented — overlaps resolve to a Laplacian
+  pyramid blend (see above) that fades fine detail over a few pixels and broad
+  illumination over the whole overlap.
 - **Seam carving.** Instead of blending every overlap, find the path through
   each overlap where the frames agree most and cut there, fading only a few
   pixels across it. The current cross-fade trades a little sharpness for the

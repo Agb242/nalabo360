@@ -158,7 +158,10 @@ data class SphereFrame(
  * is left is a reprojection: every pixel of the output canvas is a direction on
  * the sphere, and for each frame that direction is rotated into the frame's axes
  * and divided through by depth to find the pixel that saw it. Overlaps are
- * resolved by a feathered weighted mean, so seams cross-fade.
+ * resolved by multi-band blending (see [MultibandBlender]): every frame and its
+ * feather mask are split into Laplacian/Gaussian pyramids and each band is
+ * cross-faded with a mask sized to the band, so a seam is faded at every scale
+ * by a transition narrower than the detail that scale carries.
  *
  * The measured poses are not the last word. [PoseRefiner] matches ORB features
  * between overlapping frames and solves for a small per-frame correction on top
