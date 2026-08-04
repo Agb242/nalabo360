@@ -16,6 +16,7 @@ import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
+import androidx.camera.core.resolutionselector.AspectRatioStrategy
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -24,12 +25,15 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
@@ -42,10 +46,12 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -142,9 +148,26 @@ fun PhotoSphereCameraScreen(
     // lambda reads it.
     val orientationState = tracker.orientation.collectAsStateWithLifecycle()
     val feedback = rememberCaptureFeedback()
-    val optics = rememberSphereOptics()
-    val fieldOfView = optics.fieldOfView
     val deviceProfile = remember { SphereDeviceProfile.forDevice() }
+
+    // Which lens CameraX actually bound, and the shape of the buffer it is
+    // producing. Both are only knowable once the bind has resolved, and both
+    // scale everything downstream — the spacing of the plan, the rectangles on
+    // the overlay, the angle each stitched frame is taken to cover — so the
+    // optics are re-read from them rather than from a guess at what would bind.
+    var boundCameraId by remember { mutableStateOf<String?>(null) }
+    var streamAspectRatio by remember { mutableFloatStateOf(0f) }
+    val optics = rememberSphereOptics(boundCameraId, streamAspectRatio)
+    val fieldOfView = optics.fieldOfView
+
+    // A ring is one band of sphere around the horizon; the full plan walks
+    // rings out to both poles. Read live inside the capture loop rather than
+    // captured when it starts, so switching does not have to restart the camera.
+    var isRingCapture by rememberSaveable { mutableStateOf(false) }
+    val captureScope =
+        if (isRingCapture) SphereCaptureScope.Ring else SphereCaptureScope.Sphere
+    val currentFieldOfView by rememberUpdatedState(fieldOfView)
+    val currentScope by rememberUpdatedState(captureScope)
 
     val previewView = remember(context) {
         PreviewView(context).apply {
@@ -201,10 +224,12 @@ fun PhotoSphereCameraScreen(
         val profile = resolveSphereCaptureProfile(context, deviceProfile)
         captureProfile = profile
 
-        // A sphere is captured faster the wider each frame is, so the widest
-        // back lens is preferred (the 12 MP ultrawide on the S23 rather than
-        // the 50 MP main). Falls back to the default back camera if that lens
-        // cannot be bound.
+        // Which lens the sphere is shot on, per the device profile. Speed-first
+        // profiles take the widest back lens, because a sphere is captured
+        // faster the more each frame covers; sharpness-first profiles (the S23
+        // among them) take the default back camera, which Android requires to
+        // be the primary rear one — the main lens, not the ultrawide. Either
+        // way the optics are re-read afterwards from whatever actually bound.
         val cameraSelector = if (deviceProfile.preferWidestCamera) {
             widestCameraSelector(context) ?: CameraSelector.DEFAULT_BACK_CAMERA
         } else {
@@ -217,6 +242,19 @@ fun PhotoSphereCameraScreen(
         // in the preview's repeating request as well as the stills', so the
         // viewfinder shows exactly what each frame will record.
         val preview = Preview.Builder()
+            // Pinned to the stills' shape. Left to itself CameraX picks a
+            // preview close to the display's aspect ratio — 16:9 or taller on a
+            // modern phone — which off a 4:3 sensor is a *crop*, not a squeeze:
+            // it throws away a quarter of one axis. The overlay would then be
+            // drawing the field of view of a frame the viewfinder never shows,
+            // and the markers would sit where the capture reaches rather than
+            // where the user can see. One shape for both keeps a single field of
+            // view honest about the preview and the stills at once.
+            .setResolutionSelector(
+                ResolutionSelector.Builder()
+                    .setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
+                    .build()
+            )
             .also { applySphereCaptureOptions(Camera2Interop.Extender(it), profile) }
             .build()
             .apply {
@@ -234,6 +272,7 @@ fun PhotoSphereCameraScreen(
             // more resolution than the stitch reads.
             .setResolutionSelector(
                 ResolutionSelector.Builder()
+                    .setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
                     .setResolutionStrategy(
                         ResolutionStrategy(
                             Size(
@@ -265,6 +304,19 @@ fun PhotoSphereCameraScreen(
             }
             imageCapture = capture
             boundCamera = camera
+            // The lens that answered, not the one that was asked for: a filter
+            // that matched nothing, or a device that substitutes a logical
+            // camera, both land here and both would otherwise leave the optics
+            // describing a lens the session is not looking through.
+            boundCameraId = runCatching {
+                Camera2CameraInfo.from(camera.cameraInfo).cameraId
+            }.getOrNull()
+            streamAspectRatio = capture.resolutionInfo
+                ?.resolution
+                ?.takeIf { it.width > 0 && it.height > 0 }
+                ?.let { it.width.toFloat() / it.height }
+                ?: 0f
+            Log.i(TAG, "Bound camera $boundCameraId, stills $streamAspectRatio:1")
         } catch (e: Exception) {
             Log.e(TAG, "Camera binding failed", e)
             snackbarHostState.showSnackbar(
@@ -319,7 +371,8 @@ fun PhotoSphereCameraScreen(
             val currentPlan = plan
                 ?: SphereTargetPlan.createForFieldOfView(
                     startYawDegrees = orientation.yawDegrees,
-                    fieldOfView = fieldOfView,
+                    fieldOfView = currentFieldOfView,
+                    scope = currentScope,
                 ).also { plan = it }
 
             val target = currentPlan.getOrNull(activeIndex)
@@ -392,8 +445,26 @@ fun PhotoSphereCameraScreen(
         }
     }
 
+    // A plan is laid out from the optics and the scope, so both changing has to
+    // throw it away and start again. Only while the session is still empty:
+    // re-planning around captured frames would renumber the targets they were
+    // shot against. Both changes happen before the first frame in practice —
+    // the optics settle as the camera binds, and the scope toggle is only
+    // offered until capture starts.
+    LaunchedEffect(fieldOfView, captureScope) {
+        if (buffer.frames.value.isEmpty()) {
+            plan = null
+            activeIndex = 0
+            isHolding = false
+            alignment = AlignmentState()
+        }
+    }
+
     val totalTargets = plan?.size ?: 0
     val isComplete = totalTargets > 0 && activeIndex >= totalTargets
+    val capturedTargets = activeIndex.coerceAtMost(totalTargets)
+    val completedRings = plan?.completedRings(capturedTargets) ?: 0
+    val ringCount = plan?.ringCount ?: 0
 
     /** Clears the guidance state so the next sphere starts from scratch. */
     fun resetGuidance() {
@@ -435,6 +506,10 @@ fun PhotoSphereCameraScreen(
                     maxInputDimension = deviceProfile.stitchMaxInputDimension,
                     maxOutputWidth = deviceProfile.stitchMaxOutputWidth,
                     unsharpAmount = deviceProfile.unsharpAmount,
+                    // Guided capture is shot standing up and turning on the
+                    // spot, so the lens swings on the end of an arm rather than
+                    // sitting on the axis. See PivotModel.
+                    pivot = deviceProfile.pivot,
                 ) { stitchProgress.value = it }
                     .onSuccess { sphere ->
                         val stitched = try {
@@ -521,8 +596,10 @@ fun PhotoSphereCameraScreen(
             }
 
             CaptureHud(
-                capturedCount = activeIndex.coerceAtMost(totalTargets),
+                capturedCount = capturedTargets,
                 totalTargets = totalTargets,
+                completedRings = completedRings,
+                ringCount = ringCount,
                 hint = captureHint(
                     isSensorAvailable = tracker.isSensorAvailable,
                     isCameraReady = imageCapture != null,
@@ -530,6 +607,8 @@ fun PhotoSphereCameraScreen(
                     isComplete = isComplete,
                     isHolding = isHolding,
                     accuracy = accuracy,
+                    completedRings = completedRings,
+                    ringCount = ringCount,
                 ),
                 lockBadge = when (captureProfile?.focusMode) {
                     FocusMode.FIXED_INFINITY -> stringResource(R.string.capture_lock_infinity)
@@ -538,10 +617,15 @@ fun PhotoSphereCameraScreen(
                     null -> null
                 },
                 isComplete = isComplete,
-                // Below this the stitcher has nothing to work with: a handful of
-                // frames from one corner of the sphere cannot be registered.
+                // Three overlapping frames are already a panorama. Whether one
+                // is worth keeping is the user's call, made on the result
+                // screen; the button's job is not to stand between them and it.
                 canStitch = bufferedFrames.size >= PhotoSphereStitcher.MIN_FRAMES &&
                     stitchJob == null,
+                // Switching scope re-lays the plan, so it is only offered while
+                // there is nothing captured that the plan would renumber.
+                captureScope = if (bufferedFrames.isEmpty()) captureScope else null,
+                onCaptureScopeChange = { isRingCapture = it == SphereCaptureScope.Ring },
                 onFinish = { startStitch() },
                 onRestart = {
                     resetGuidance()
@@ -555,15 +639,25 @@ fun PhotoSphereCameraScreen(
     }
 }
 
-/** Frame counter, progress bar, and the one line of guidance the user needs. */
+/**
+ * Frame counter, progress bar, and the one line of guidance the user needs.
+ *
+ * [captureScope] doubles as the switch's visibility: non-null offers the choice
+ * between a ring and a whole sphere, null means capture has started and the plan
+ * is no longer the user's to change.
+ */
 @Composable
 private fun CaptureHud(
     capturedCount: Int,
     totalTargets: Int,
+    completedRings: Int,
+    ringCount: Int,
     hint: String,
     lockBadge: String?,
     isComplete: Boolean,
     canStitch: Boolean,
+    captureScope: SphereCaptureScope?,
+    onCaptureScopeChange: (SphereCaptureScope) -> Unit,
     onFinish: () -> Unit,
     onRestart: () -> Unit,
     modifier: Modifier = Modifier,
@@ -592,6 +686,15 @@ private fun CaptureHud(
                     trackColor = Color.White.copy(alpha = 0.25f),
                 )
             }
+            // Only worth saying when there is more than one band to be part way
+            // through; a ring capture is its own progress bar.
+            if (ringCount > 1) {
+                Text(
+                    text = stringResource(R.string.capture_rings, completedRings, ringCount),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = Color.White.copy(alpha = 0.75f),
+                )
+            }
             if (lockBadge != null) {
                 Text(
                     text = lockBadge,
@@ -601,6 +704,13 @@ private fun CaptureHud(
                         .clip(RoundedCornerShape(50))
                         .background(Color.Black.copy(alpha = 0.45f))
                         .padding(horizontal = 10.dp, vertical = 4.dp),
+                )
+            }
+            if (captureScope != null) {
+                CaptureScopeSwitch(
+                    selected = captureScope,
+                    onSelect = onCaptureScopeChange,
+                    modifier = Modifier.padding(top = 4.dp),
                 )
             }
         }
@@ -636,6 +746,50 @@ private fun CaptureHud(
                     Text(stringResource(R.string.capture_restart))
                 }
             }
+        }
+    }
+}
+
+/**
+ * Picks how much of the sphere this run is aiming at.
+ *
+ * Only offered before the first frame, because the choice is what the plan is
+ * laid out from. It is not a commitment either way — a sphere run can be
+ * stitched the moment its first ring closes — but starting in [SphereCaptureScope.Ring]
+ * makes the progress bar count against something a dozen frames long instead of
+ * forty, which is the difference between finishing a capture and abandoning one.
+ */
+@Composable
+private fun CaptureScopeSwitch(
+    selected: SphereCaptureScope,
+    onSelect: (SphereCaptureScope) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        SphereCaptureScope.entries.forEach { scope ->
+            FilterChip(
+                selected = scope == selected,
+                onClick = { onSelect(scope) },
+                label = {
+                    Text(
+                        stringResource(
+                            when (scope) {
+                                SphereCaptureScope.Ring -> R.string.capture_scope_ring
+                                SphereCaptureScope.Sphere -> R.string.capture_scope_sphere
+                            }
+                        )
+                    )
+                },
+                colors = FilterChipDefaults.filterChipColors(
+                    containerColor = Color.Black.copy(alpha = 0.45f),
+                    labelColor = Color.White,
+                    selectedContainerColor = Color(0xFF3DDC84),
+                    selectedLabelColor = Color.Black,
+                ),
+            )
         }
     }
 }
@@ -788,6 +942,8 @@ private fun captureHint(
     isComplete: Boolean,
     isHolding: Boolean,
     accuracy: OrientationAccuracy,
+    completedRings: Int,
+    ringCount: Int,
 ): String = when {
     !isSensorAvailable -> stringResource(R.string.capture_orientation_unavailable)
     !isCameraReady -> stringResource(R.string.capture_starting)
@@ -795,6 +951,9 @@ private fun captureHint(
     !hasPlan -> stringResource(R.string.capture_waiting_for_orientation)
     accuracy == OrientationAccuracy.Unreliable -> stringResource(R.string.capture_low_accuracy)
     isHolding -> stringResource(R.string.capture_hint_hold)
+    // A closed ring is a complete band of sphere and a perfectly good result.
+    // Saying so is what turns "keep going or lose it" into a real choice.
+    completedRings > 0 -> stringResource(R.string.capture_hint_ring_done, completedRings, ringCount)
     else -> stringResource(R.string.capture_hint_search)
 }
 

@@ -109,8 +109,11 @@ class SphereTargetPlanTest {
             val separation = angularDistance(equator[0], equator[1])
             1f - separation / horizontalFov
         }
-        assertTrue("narrow-lens overlap off target", overlap(narrow, 52f) in 0.1f..0.4f)
-        assertTrue("wide-lens overlap off target", overlap(wide, 76f) in 0.1f..0.4f)
+        // The band is wide because the plan deliberately spends less of the
+        // lens than the lens claims (FIELD_OF_VIEW_SAFETY_FACTOR), so the real
+        // overlap sits above the nominal target rather than below it.
+        assertTrue("narrow-lens overlap off target", overlap(narrow, 52f) in 0.2f..0.55f)
+        assertTrue("wide-lens overlap off target", overlap(wide, 76f) in 0.2f..0.55f)
     }
 
     @Test
@@ -181,6 +184,71 @@ class SphereTargetPlanTest {
         assertEquals(1, positive.size)
         val top = positive.first()
         assertTrue("cap $top leaves the pole uncovered", top + 105f / 2f >= 90f)
+    }
+
+    @Test
+    fun `a ring capture lays out the horizon and nothing else`() {
+        val ring = SphereTargetPlan.createForFieldOfView(
+            startYawDegrees = 0f,
+            fieldOfView = FieldOfView(horizontalDegrees = 52f, verticalDegrees = 66f),
+            scope = SphereCaptureScope.Ring,
+        )
+
+        assertEquals(1, ring.ringCount)
+        assertTrue("a ring should still take a dozen-odd frames", ring.size in 8..20)
+        ring.targets.forEach {
+            assertEquals("ring target off the horizon", 0f, it.elevationDegrees, TOLERANCE)
+        }
+    }
+
+    @Test
+    fun `a sphere capture is many rings and starts with the horizon`() {
+        val sphere = SphereTargetPlan.createForFieldOfView(
+            startYawDegrees = 0f,
+            fieldOfView = FieldOfView(horizontalDegrees = 52f, verticalDegrees = 66f),
+            scope = SphereCaptureScope.Sphere,
+        )
+        val ring = SphereTargetPlan.createForFieldOfView(
+            startYawDegrees = 0f,
+            fieldOfView = FieldOfView(horizontalDegrees = 52f, verticalDegrees = 66f),
+            scope = SphereCaptureScope.Ring,
+        )
+
+        assertTrue("a sphere should take more rings than a ring", sphere.ringCount > 1)
+        // The first ring of a sphere run *is* the ring run, which is what lets a
+        // user start on a sphere and stop with a complete band anyway.
+        assertEquals(ring.size, sphere.rings.first().last + 1)
+    }
+
+    @Test
+    fun `rings cover the plan exactly once, in order`() {
+        val plan = SphereTargetPlan.createForFieldOfView(
+            startYawDegrees = 12f,
+            fieldOfView = FieldOfView(horizontalDegrees = 52f, verticalDegrees = 66f),
+        )
+
+        assertEquals(0, plan.rings.first().first)
+        assertEquals(plan.size - 1, plan.rings.last().last)
+        plan.rings.zipWithNext { earlier, later ->
+            assertEquals("rings must be contiguous", earlier.last + 1, later.first)
+        }
+    }
+
+    @Test
+    fun `a ring counts as complete only once its last target is shot`() {
+        val plan = SphereTargetPlan.createForFieldOfView(
+            startYawDegrees = 0f,
+            fieldOfView = FieldOfView(horizontalDegrees = 52f, verticalDegrees = 66f),
+        )
+        val firstRing = plan.rings.first()
+
+        // One short of the ring's last target is still no complete ring.
+        assertEquals(0, plan.completedRings(firstRing.last))
+        assertEquals(1, plan.completedRings(firstRing.last + 1))
+
+        // Nothing captured is no rings, whatever the plan looks like.
+        assertEquals(0, plan.completedRings(0))
+        assertEquals(plan.ringCount, plan.completedRings(plan.size))
     }
 
     /** Great-circle angle between two targets, for checking coverage. */

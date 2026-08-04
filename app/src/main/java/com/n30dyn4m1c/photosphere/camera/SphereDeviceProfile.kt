@@ -1,6 +1,7 @@
 package com.n30dyn4m1c.photosphere.camera
 
 import android.os.Build
+import com.n30dyn4m1c.photosphere.stitching.PivotModel
 
 /**
  * Per-device tuning, decided once per phone.
@@ -33,6 +34,13 @@ data class SphereDeviceProfile(
     val stitchMaxOutputWidth: Int,
     /** Unsharp-mask strength on the finished canvas, 0 = off. */
     val unsharpAmount: Float,
+    /**
+     * How the phone is assumed to be swung around: how far the lens sits from
+     * the axis the user turns about, and how far away the scene is taken to be.
+     * See [PivotModel] — this is the correction for pivoting around your body
+     * rather than around the camera.
+     */
+    val pivot: PivotModel,
 ) {
     companion object {
         /**
@@ -48,6 +56,7 @@ data class SphereDeviceProfile(
             stitchMaxInputDimension = 1024,
             stitchMaxOutputWidth = 4096,
             unsharpAmount = 0f,
+            pivot = PivotModel.HandheldBodySwivel,
         )
 
         /**
@@ -79,6 +88,7 @@ data class SphereDeviceProfile(
             stitchMaxInputDimension = 2000,
             stitchMaxOutputWidth = 6144,
             unsharpAmount = 0.3f,
+            pivot = PivotModel.HandheldBodySwivel,
         )
 
         /** The profile for the device this process is running on. */

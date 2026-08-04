@@ -322,6 +322,7 @@ object FrameFootprint {
         canvasWidth: Int,
         canvasHeight: Int,
         marginPx: Int = 2,
+        pivotRatio: Double = 0.0,
     ): CanvasFootprint {
         val centreLongitude = Equirectangular.longitudeOf(basis.forwardX, basis.forwardY)
 
@@ -331,9 +332,19 @@ object FrameFootprint {
         var maxLatitude = -Double.MAX_VALUE
 
         forEachBorderDirection(intrinsics) { cameraX, cameraY ->
-            val world = basis.toWorld(cameraX, cameraY, 1.0)
-            val length = length(world)
-            val latitude = Equirectangular.latitudeOf(world[2] / length)
+            val ray = basis.toWorld(cameraX, cameraY, 1.0)
+            val length = length(ray)
+            // The canvas is indexed by directions from the *pivot*, so a border
+            // ray has to be followed out to the scene and looked back along from
+            // there. With no lever arm the two are the same direction.
+            val world = pivotDirection(
+                basis = basis,
+                pivotRatio = pivotRatio,
+                x = ray[0] / length,
+                y = ray[1] / length,
+                z = ray[2] / length,
+            )
+            val latitude = Equirectangular.latitudeOf(world[2])
             // Unwrap onto the branch nearest the frame centre, so a border point
             // just past +180° reads as slightly more than the centre rather than
             // as nearly a full turn less.
@@ -351,8 +362,8 @@ object FrameFootprint {
         // A frame looking over a pole sees every longitude; the border walk finds
         // only the longitudes its edges happen to cross, which would cut the
         // frame in half. Test the poles directly instead.
-        val coversNorthPole = containsDirection(basis, intrinsics, 0.0, 0.0, 1.0)
-        val coversSouthPole = containsDirection(basis, intrinsics, 0.0, 0.0, -1.0)
+        val coversNorthPole = containsDirection(basis, intrinsics, 0.0, 0.0, 1.0, pivotRatio)
+        val coversSouthPole = containsDirection(basis, intrinsics, 0.0, 0.0, -1.0, pivotRatio)
         if (coversNorthPole) maxLatitude = 90.0
         if (coversSouthPole) minLatitude = -90.0
 
@@ -390,7 +401,8 @@ object FrameFootprint {
         x: Double,
         y: Double,
         z: Double,
-    ): Boolean = projectDirection(basis, intrinsics, x, y, z) != null
+        pivotRatio: Double,
+    ): Boolean = projectDirection(basis, intrinsics, x, y, z, pivotRatio) != null
 
     /** Calls [block] with the camera-frame ray of each sampled border pixel. */
     private fun forEachBorderDirection(
@@ -448,6 +460,40 @@ object FrameFootprint {
 internal const val MIN_DEPTH = 1e-6
 
 /**
+ * The direction *from the pivot* to the scene point a camera ray runs into.
+ *
+ * [x], [y], [z] are a unit world direction leaving the lens, and the lens sits
+ * at `pivotRatio × forward` on a unit sphere of scene (see [PivotModel]). The
+ * scene point is where that ray meets the sphere, and what comes back is the
+ * unit direction to it from the pivot — the frame the canvas is indexed in.
+ *
+ * With [pivotRatio] at zero the lens *is* the pivot and the direction is handed
+ * straight back.
+ */
+internal fun pivotDirection(
+    basis: CameraBasis,
+    pivotRatio: Double,
+    x: Double,
+    y: Double,
+    z: Double,
+): DoubleArray {
+    if (pivotRatio <= 0.0) return doubleArrayOf(x, y, z)
+
+    // |k·f + t·d| = 1 with d a unit ray, solved for the positive root. The
+    // discriminant cannot go negative for k < 1, but the floor costs nothing.
+    val alongAxis = basis.depthOf(x, y, z)
+    val half = pivotRatio * alongAxis
+    val distance = -half + Math.sqrt(max(half * half - pivotRatio * pivotRatio + 1.0, 0.0))
+
+    val px = pivotRatio * basis.forwardX + distance * x
+    val py = pivotRatio * basis.forwardY + distance * y
+    val pz = pivotRatio * basis.forwardZ + distance * z
+    val length = Math.sqrt(px * px + py * py + pz * pz)
+    if (length <= 0.0) return doubleArrayOf(x, y, z)
+    return doubleArrayOf(px / length, py / length, pz / length)
+}
+
+/**
  * The pixel of a frame that looked in a given world direction, or null when the
  * direction falls outside the frame or behind the camera.
  *
@@ -459,6 +505,13 @@ internal const val MIN_DEPTH = 1e-6
  * and the tests share this one, keeping an independent statement of the same
  * geometry.
  *
+ * [x], [y], [z] is a direction from the *pivot*, which is the lens only when
+ * [pivotRatio] is zero. Everywhere else the lens sits `pivotRatio` of the way
+ * out towards the scene along its own optical axis, and correcting for that
+ * costs exactly one subtraction: the lever arm is parallel to the forward axis,
+ * so it cancels out of the lateral and vertical components and shortens the
+ * depth alone. The direction must be a *unit* vector for that to hold.
+ *
  * The returned array is `[column, row]` in the frame's pixel coordinates, where
  * rows increase downwards while the camera's "up" axis points the other way.
  */
@@ -468,8 +521,9 @@ internal fun projectDirection(
     x: Double,
     y: Double,
     z: Double,
+    pivotRatio: Double = 0.0,
 ): DoubleArray? {
-    val depth = basis.depthOf(x, y, z)
+    val depth = basis.depthOf(x, y, z) - pivotRatio
     if (depth <= MIN_DEPTH) return null
     val centreX = intrinsics.centerXPx
     val centreY = intrinsics.centerYPx

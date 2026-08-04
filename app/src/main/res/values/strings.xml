@@ -14,11 +14,15 @@
 
     <!-- Guided capture HUD. -->
     <string name="capture_progress">%1$d / %2$d frames</string>
+    <string name="capture_rings">%1$d of %2$d rings complete</string>
+    <string name="capture_scope_ring">Ring</string>
+    <string name="capture_scope_sphere">Full sphere</string>
     <string name="capture_lock_infinity">Exposure &amp; white balance locked · focus at infinity</string>
     <string name="capture_lock_first">Exposure &amp; white balance locked · focus locked</string>
     <string name="capture_lock_fixed">Exposure &amp; white balance locked · fixed-focus lens</string>
     <string name="capture_hint_search">Move the reticle onto the marker</string>
     <string name="capture_hint_hold">Hold still…</string>
+    <string name="capture_hint_ring_done">Ring %1$d of %2$d done — stitch now, or keep going</string>
     <string name="capture_waiting_for_orientation">Finding your bearing…</string>
     <string name="capture_low_accuracy">Compass unreliable — wave the phone in a figure eight</string>
     <string name="capture_orientation_unavailable">This device has no rotation vector sensor, so guided capture is unavailable.</string>
@@ -27,7 +31,7 @@
     <string name="capture_finish_stitch">Finish &amp; stitch</string>
     <string name="capture_instructions_title">Before you start</string>
     <string name="capture_instructions_1">Stand in one spot and rotate your body in place — don\'t walk.</string>
-    <string name="capture_instructions_2">Hold the phone steady and level, turning it around a fixed point as you pan.</string>
+    <string name="capture_instructions_2">Turn on the spot, keeping the phone at the same height and distance from you.</string>
     <string name="capture_instructions_3">The shutter fires on its own — pause a moment on each marker.</string>
     <string name="capture_instructions_4">Avoid blank walls and bright skies, and move slowly.</string>
     <string name="capture_instructions_dismiss">Got it</string>
@@ -41,7 +45,7 @@
     <string name="stitch_stage_projecting">Shaping the equirectangular image…</string>
     <string name="stitch_cancel">Cancel</string>
     <string name="stitch_failed">Stitch failed. %1$s</string>
-    <string name="stitch_error_need_more_images">Not enough overlapping frames — capture more of the sphere and try again.</string>
+    <string name="stitch_error_need_more_images">Too little of the scene was captured. Take at least three frames on neighbouring markers and try again.</string>
     <string name="stitch_error_alignment">The frames don\'t line up. Turn the phone on the spot rather than walking around, and avoid blank walls or open sky.</string>
     <string name="stitch_error_camera_estimation">The frames couldn\'t be resolved into one camera view. Try capturing the sphere again.</string>
     <string name="stitch_error_opencv_unavailable">Stitching is unavailable on this device — the OpenCV library did not load.</string>

@@ -89,12 +89,18 @@ internal object EquirectangularRenderer {
      * [onBandComplete] is called with the number of bands finished so far and
      * the total, for progress reporting; [checkCancelled] is called at every band
      * boundary and may throw to abandon the render.
+     *
+     * [pivotRatio] is [PivotModel.ratio]: how far the lens sat from the axis the
+     * user turned about, as a fraction of the scene's distance. Zero treats the
+     * lens as the pivot, which is what a tripod gives and what a hand-held
+     * capture never quite does.
      */
     fun render(
         frames: List<PreparedFrame>,
         canvasWidth: Int,
         canvasHeight: Int,
         gains: FloatArray? = null,
+        pivotRatio: Double = 0.0,
         onBandComplete: (completed: Int, total: Int) -> Unit = { _, _ -> },
         checkCancelled: () -> Unit = {},
     ): Rendered {
@@ -115,6 +121,7 @@ internal object EquirectangularRenderer {
                     bandTop = bandTop,
                     bandHeight = bandHeight,
                     gains = gains,
+                    pivotRatio = pivotRatio,
                 )
                 onBandComplete(band + 1, bandCount)
             }
@@ -136,6 +143,7 @@ internal object EquirectangularRenderer {
         bandTop: Int,
         bandHeight: Int,
         gains: FloatArray?,
+        pivotRatio: Double,
     ): Long {
         val colorSum = Mat.zeros(bandHeight, canvasWidth, CvType.CV_32FC3)
         val weightSum = Mat.zeros(bandHeight, canvasWidth, CvType.CV_32FC1)
@@ -162,6 +170,7 @@ internal object EquirectangularRenderer {
                         columnStart = canvasColumn,
                         columnCount = columnSpan,
                         gain = gains?.getOrNull(frameIndex) ?: 1f,
+                        pivotRatio = pivotRatio,
                     )
                 }
             }
@@ -195,6 +204,7 @@ internal object EquirectangularRenderer {
         columnStart: Int,
         columnCount: Int,
         gain: Float,
+        pivotRatio: Double,
     ) {
         if (rowCount <= 0 || columnCount <= 0) return
 
@@ -238,8 +248,13 @@ internal object EquirectangularRenderer {
             val rowBase = rowOffset * columnCount
 
             for (columnOffset in 0 until columnCount) {
+                // The canvas direction is a unit vector from the pivot, and the
+                // lens sits `pivotRatio` of the way out along its own optical
+                // axis (see PivotModel). The lever arm is parallel to forward, so
+                // it drops out of the two lateral components and shortens the
+                // depth alone — the whole parallax correction is this subtraction.
                 val depth = cosLatitude * forwardHorizontal[columnOffset] +
-                    sinLatitude * basis.forwardZ
+                    sinLatitude * basis.forwardZ - pivotRatio
                 val index = rowBase + columnOffset
                 if (depth <= MIN_DEPTH) {
                     // Behind the camera. A map coordinate outside the source

@@ -32,7 +32,29 @@ data class SphereTarget(
 }
 
 /**
- * The ordered set of frames that makes up one sphere.
+ * How much of the sphere a capture run is aiming at.
+ *
+ * The difference is only in how many rings get laid out. Either way the run can
+ * be stitched from whatever has been captured when the user stops, so this sets
+ * the target the progress bar counts against, not a floor on the result.
+ */
+enum class SphereCaptureScope {
+    /**
+     * One ring around the horizon.
+     *
+     * A dozen-odd frames instead of forty, and the natural thing to shoot when
+     * what matters is around you rather than above and below: a street, a
+     * viewpoint, a room at eye level. The output is still equirectangular, with
+     * the sky and floor left black.
+     */
+    Ring,
+
+    /** Rings from the horizon out to both poles: the whole sphere. */
+    Sphere,
+}
+
+/**
+ * The ordered set of frames that makes up one capture run.
  *
  * Targets sit on horizontal rings. Each ring holds evenly spaced yaws, and the
  * spacing widens with elevation by `1 / cos(elevation)` so neighbouring frames
@@ -44,16 +66,34 @@ data class SphereTarget(
  * direction, so each ring ends roughly where the next one begins and the user
  * never has to spin back through 360° between frames.
  *
- * Rings stop at ±60°, matching the brief. The caps are left to the stitcher's
- * feathering rather than to the user's patience.
+ * [rings] records where each ring starts and ends in [targets], which is what
+ * lets the capture screen say "that's the horizon done" at the moment a ring
+ * closes rather than only when the whole plan is walked. A run stitched at a
+ * ring boundary is a complete band of sphere; one stopped mid-ring has a gap in
+ * it, and the difference is worth telling the user about.
  */
-data class SphereTargetPlan(val targets: List<SphereTarget>) {
+data class SphereTargetPlan(
+    val targets: List<SphereTarget>,
+    val rings: List<IntRange> = if (targets.isEmpty()) emptyList() else listOf(targets.indices),
+) {
 
     val size: Int get() = targets.size
 
     operator fun get(index: Int): SphereTarget = targets[index]
 
     fun getOrNull(index: Int): SphereTarget? = targets.getOrNull(index)
+
+    /** How many rings the plan lays out. */
+    val ringCount: Int get() = rings.size
+
+    /**
+     * How many whole rings the first [capturedCount] targets cover.
+     *
+     * Counting closed rings rather than frames is what makes "you have a
+     * complete band, stitch now or carry on" something the screen can say.
+     */
+    fun completedRings(capturedCount: Int): Int =
+        rings.count { capturedCount > it.last }
 
     companion object {
         /**
@@ -82,6 +122,23 @@ data class SphereTargetPlan(val targets: List<SphereTarget>) {
          * small overlap would turn a degree of sensor drift into a missed edge.
          */
         const val DEFAULT_TARGET_OVERLAP_FRACTION: Float = 0.35f
+
+        /**
+         * Fraction of the reported field of view the plan actually spends.
+         *
+         * The overlap above is only as good as the field of view it is measured
+         * against, and that number is an estimate read off optics the camera
+         * describes with varying honesty — a logical multi-camera that lists
+         * every lens's focal length, an intrinsic calibration quoted against a
+         * different sensor crop than the one being streamed. Overestimating it
+         * by a tenth spaces the targets a tenth too far apart, and the overlap
+         * the stitcher needs is the first thing to be eaten.
+         *
+         * So the plan is laid out as though the lens were slightly narrower than
+         * it claims. The cost is a few more frames; the alternative is a run
+         * that only reveals itself as un-stitchable at the end.
+         */
+        const val FIELD_OF_VIEW_SAFETY_FACTOR: Float = 0.9f
 
         /**
          * Lays out a sphere whose first target sits at [startYawDegrees].
@@ -116,17 +173,32 @@ data class SphereTargetPlan(val targets: List<SphereTarget>) {
         fun createForFieldOfView(
             startYawDegrees: Float,
             fieldOfView: FieldOfView,
+            scope: SphereCaptureScope = SphereCaptureScope.Sphere,
             ringElevations: List<Float>? = null,
             targetOverlapFraction: Float = DEFAULT_TARGET_OVERLAP_FRACTION,
         ): SphereTargetPlan {
             require(targetOverlapFraction in 0f..1f) {
                 "overlap fraction must be between 0 and 1, was $targetOverlapFraction"
             }
+            // Both axes are shaded down together, so the rings step as
+            // conservatively as the yaws do and the vertical overlap keeps pace
+            // with the horizontal one.
+            val planned = FieldOfView(
+                horizontalDegrees = fieldOfView.horizontalDegrees * FIELD_OF_VIEW_SAFETY_FACTOR,
+                verticalDegrees = fieldOfView.verticalDegrees * FIELD_OF_VIEW_SAFETY_FACTOR,
+            )
             val elevations = ringElevations
-                ?: adaptiveRingElevations(fieldOfView.verticalDegrees, targetOverlapFraction)
-            val spacing = fieldOfView.horizontalDegrees * (1f - targetOverlapFraction)
+                ?: when (scope) {
+                    SphereCaptureScope.Ring -> RING_ELEVATIONS
+                    SphereCaptureScope.Sphere ->
+                        adaptiveRingElevations(planned.verticalDegrees, targetOverlapFraction)
+                }
+            val spacing = planned.horizontalDegrees * (1f - targetOverlapFraction)
             return createUnchecked(startYawDegrees, elevations, spacing)
         }
+
+        /** The single ring a [SphereCaptureScope.Ring] run walks. */
+        private val RING_ELEVATIONS: List<Float> = listOf(0f)
 
         private fun createUnchecked(
             startYawDegrees: Float,
@@ -135,16 +207,18 @@ data class SphereTargetPlan(val targets: List<SphereTarget>) {
         ): SphereTargetPlan {
             require(equatorSpacingDegrees > 0f) { "spacing must be positive" }
 
-            val targets = buildList {
-                ringElevations.forEachIndexed { ringIndex, elevation ->
-                    val ring = ringYaws(startYawDegrees, elevation, equatorSpacingDegrees)
-                    // Reverse every other ring so consecutive rings meet at the
-                    // same bearing instead of a full turn apart.
-                    val ordered = if (ringIndex % 2 == 0) ring else ring.reversed()
-                    ordered.forEach { yaw -> add(SphereTarget.atElevation(yaw, elevation)) }
-                }
+            val targets = ArrayList<SphereTarget>()
+            val rings = ArrayList<IntRange>(ringElevations.size)
+            ringElevations.forEachIndexed { ringIndex, elevation ->
+                val ring = ringYaws(startYawDegrees, elevation, equatorSpacingDegrees)
+                // Reverse every other ring so consecutive rings meet at the
+                // same bearing instead of a full turn apart.
+                val ordered = if (ringIndex % 2 == 0) ring else ring.reversed()
+                val start = targets.size
+                ordered.forEach { yaw -> targets += SphereTarget.atElevation(yaw, elevation) }
+                if (targets.size > start) rings += start..targets.lastIndex
             }
-            return SphereTargetPlan(targets)
+            return SphereTargetPlan(targets, rings)
         }
 
         private fun ringYaws(
