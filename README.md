@@ -540,6 +540,39 @@ every scale by a transition narrower than the detail that scale carries. A
 pixel only one frame reached still comes out at full strength, because its
 mask divides back out.
 
+**Seam carving** is the alternative to the wide cross-fade, toggled by the
+debug **Seam** button next to Dist/Refine. [`SeamFinder`](app/src/main/java/com/n30dyn4m1c/photosphere/stitching/SeamFinder.kt)
+asks which single frame should paint each pixel, instead of letting every
+overlapping frame contribute, and the renderer then paints near-hard selections
+that fade only a few pixels across each cut — the sharpness a cross-fade
+spends. The question is posed as an energy over the overlap:
+
+- The **data term** for a pixel and a frame is how far the frame's sample sits
+  from the mean of every frame covering that pixel — the frame closest to what
+  the overlap actually shows wins the interior.
+- The **seam cost** for cutting between two neighbouring pixels with different
+  frames is how differently the two frames see those pixels, so a cut through a
+  region where the frames agree is cheap and a cut through a ghost is not. The
+  cost is a metric (a frame that does not cover a pixel is filled with that
+  pixel's mean colour, which keeps the triangle inequality intact), so every
+  expansion move is submodular and its exact min-cut can never raise the
+  energy.
+
+The energy is minimized with α-expansion — [`SeamSolver`](app/src/main/java/com/n30dyn4m1c/photosphere/stitching/SeamSolver.kt)
+— where each label in turn offers every pixel "keep your frame or switch to
+this one", and each binary subproblem is an s-t min-cut over the pixel grid
+(Dinic's max-flow). The whole solver is pure Kotlin, exercised on the JVM
+against an exhaustive search on tiny grids. The seam is decided at a reduced
+resolution (~512 columns across the canvas) because a cut only needs locating
+to within a few output pixels, and the graph-cut's cost scales with that grid
+rather than with the full canvas; [`SeamFeather`](app/src/main/java/com/n30dyn4m1c/photosphere/stitching/SeamWeights.kt)
+then turns the label map into the narrow cross-fade the renderer looks up — the
+winner holds weight 1 everywhere, and the loser's contribution ramps in from
+half on the boundary to nothing a few pixels away. The multi-band machinery is
+left to handle that narrow transition, so coarse illumination still meets
+softly where the seam runs, while fine detail keeps both copies — the point of
+carving instead of blending.
+
 The result is equirectangular *by construction* rather than by cropping
 something else into shape: a pixel's row is its latitude, so an incomplete sphere
 is black exactly where it was not shot, at the right elevation. The accuracy
@@ -637,10 +670,9 @@ read grant attached.
 - **Multi-band blending** is implemented — overlaps resolve to a Laplacian
   pyramid blend (see above) that fades fine detail over a few pixels and broad
   illumination over the whole overlap.
-- **Seam carving.** Instead of blending every overlap, find the path through
-  each overlap where the frames agree most and cut there, fading only a few
-  pixels across it. The current cross-fade trades a little sharpness for the
-  certainty of never exposing a gap.
+- **Seam carving** is implemented — instead of blending every overlap, a
+  graph-cut finds the assignment of each pixel to the frame that agrees best
+  and cuts there, fading only a few pixels across it (see [Stitching](#stitching)).
 
 ## License
 

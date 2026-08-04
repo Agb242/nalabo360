@@ -41,6 +41,14 @@ internal class PreparedFrame(
  * one, so a seam that survives one band does not survive the one that carried
  * it. See [MultibandBlender] for the maths.
  *
+ * With a [SeamWeights] assignment the per-pixel feather is replaced by the seam
+ * weights: the winning frame of each pixel contributes at full strength and
+ * every other frame contributes nothing, except for a few pixels either side of
+ * each cut where the loser's contribution ramps in — seam carving, with the
+ * multi-band machinery left to handle the narrow transition. Outside an overlap
+ * the weights are still all on one frame, so single-coverage detail comes
+ * through untouched either way. See [SeamFinder].
+ *
  * **Memory.** A 4096-wide canvas needs 100 MB of float accumulator if it is
  * held all at once, which is exactly the kind of allocation that ends a stitch
  * on a mid-range phone. Every level is therefore built in horizontal bands:
@@ -79,6 +87,11 @@ internal object EquirectangularRenderer {
      * lens as the pivot, which is what a tripod gives and what a hand-held
      * capture never quite does.
      *
+     * [seams], when given, switches the overlaps from the wide cross-fade to the
+     * seam-carved assignment (see [SeamWeights]): each pixel is painted by one
+     * frame at full strength, and only a few pixels across each cut blend the
+     * loser in. Without it the render behaves exactly as before.
+     *
      * The four span/centre numbers describe the region of the sphere the canvas
      * holds (see [Equirectangular]); they default to a full 360°×180° sphere.
      * The canvas is expected to be sized to them — `canvasHeight` should be
@@ -89,6 +102,7 @@ internal object EquirectangularRenderer {
         canvasWidth: Int,
         canvasHeight: Int,
         gains: FloatArray? = null,
+        seams: SeamWeights? = null,
         pivotRatio: Double = 0.0,
         longitudeSpanDegrees: Float = 360f,
         centerLongitudeDegrees: Float = 0f,
@@ -138,6 +152,7 @@ internal object EquirectangularRenderer {
                             bandHeight = bandHeight,
                             sourceScale = 1,
                             gains = gains,
+                            seams = seams,
                             pivotRatio = pivotRatio,
                             longitudeSpanDegrees = longitudeSpanDegrees,
                             centerLongitudeDegrees = centerLongitudeDegrees,
@@ -183,6 +198,7 @@ internal object EquirectangularRenderer {
                         bandHeight = height,
                         sourceScale = 1 shl level,
                         gains = gains,
+                        seams = seams,
                         pivotRatio = pivotRatio,
                         longitudeSpanDegrees = longitudeSpanDegrees,
                         centerLongitudeDegrees = centerLongitudeDegrees,
@@ -298,6 +314,7 @@ internal object EquirectangularRenderer {
                             bandHeight = bandHeight,
                             sourceScale = 1,
                             gains = gains,
+                            seams = seams,
                             pivotRatio = pivotRatio,
                             longitudeSpanDegrees = longitudeSpanDegrees,
                             centerLongitudeDegrees = centerLongitudeDegrees,
@@ -367,6 +384,7 @@ internal object EquirectangularRenderer {
         bandHeight: Int,
         sourceScale: Int,
         gains: FloatArray?,
+        seams: SeamWeights?,
         pivotRatio: Double,
         longitudeSpanDegrees: Float,
         centerLongitudeDegrees: Float,
@@ -409,6 +427,7 @@ internal object EquirectangularRenderer {
                 ) { canvasColumn, columnSpan ->
                     accumulateSegment(
                         frame = frame,
+                        frameIndex = frameIndex,
                         source = source,
                         sourceDivisor = divisor,
                         interpolation = interpolation,
@@ -422,6 +441,7 @@ internal object EquirectangularRenderer {
                         columnStart = canvasColumn,
                         columnCount = columnSpan,
                         gain = gains?.getOrNull(frameIndex) ?: 1f,
+                        seams = seams,
                         pivotRatio = pivotRatio,
                         longitudeSpanDegrees = longitudeSpanDegrees,
                         centerLongitudeDegrees = centerLongitudeDegrees,
@@ -452,6 +472,7 @@ internal object EquirectangularRenderer {
      */
     private fun accumulateSegment(
         frame: PreparedFrame,
+        frameIndex: Int,
         source: Mat,
         sourceDivisor: Double,
         interpolation: Int,
@@ -465,6 +486,7 @@ internal object EquirectangularRenderer {
         columnStart: Int,
         columnCount: Int,
         gain: Float,
+        seams: SeamWeights?,
         pivotRatio: Double,
         longitudeSpanDegrees: Float,
         centerLongitudeDegrees: Float,
@@ -575,9 +597,22 @@ internal object EquirectangularRenderer {
 
                 mapX[index] = (sourceColumn / sourceDivisor).toFloat()
                 mapY[index] = (sourceRow / sourceDivisor).toFloat()
-                val weight = featherWeight(idealColumn, idealRow, centreX, centreY)
-                weights[index] = weight.toFloat()
-                if (weight > 0.0) anyCovered = true
+                val weight = if (seams != null) {
+                    // Seam carving: the winner paints at full strength, the
+                    // loser only within a few pixels of the cut. The canvas
+                    // row/column are the level's own coordinates, which the
+                    // seam grid maps back from.
+                    seams.weightFor(
+                        frameIndex,
+                        rowStart + rowOffset,
+                        columnStart + columnOffset,
+                        sourceDivisor.toInt(),
+                    )
+                } else {
+                    featherWeight(idealColumn, idealRow, centreX, centreY).toFloat()
+                }
+                weights[index] = weight
+                if (weight > 0f) anyCovered = true
             }
         }
 

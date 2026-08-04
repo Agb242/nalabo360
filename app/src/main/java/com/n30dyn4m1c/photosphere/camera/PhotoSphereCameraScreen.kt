@@ -254,6 +254,9 @@ fun PhotoSphereCameraScreen(
     // back on to compare.
     var distortionEnabled by remember { mutableStateOf(false) }
     var refinementEnabled by remember { mutableStateOf(false) }
+    // Debug: seam-carve the overlaps instead of the wide cross-fade — the
+    // sharpness comparison for the same frames.
+    var seamEnabled by remember { mutableStateOf(false) }
     // Debug: paint each frame a solid colour so the pano shows where each one
     // was placed — distinguishes a placement bug from a content bug.
     var colorFrames by remember { mutableStateOf(false) }
@@ -633,6 +636,7 @@ fun PhotoSphereCameraScreen(
                     // a frame back upright when that tag was lost.
                     portraitRotationDegrees = optics.portraitRotationDegrees,
                     useRefinement = refinementEnabled,
+                    useSeams = seamEnabled,
                     debugColorFrames = colorFrames,
                     // The canvas region: a full 360° of longitude either way,
                     // and either the whole 180° of latitude (sphere) or the band
@@ -664,6 +668,7 @@ fun PhotoSphereCameraScreen(
                                             optics,
                                             distortionEnabled,
                                             refinementEnabled,
+                                            seamEnabled,
                                         )
                                     )
                             }
@@ -827,6 +832,8 @@ fun PhotoSphereCameraScreen(
                 onToggleDistortion = { distortionEnabled = !distortionEnabled },
                 refinementEnabled = refinementEnabled,
                 onToggleRefinement = { refinementEnabled = !refinementEnabled },
+                seamEnabled = seamEnabled,
+                onToggleSeams = { seamEnabled = !seamEnabled },
                 colorFrames = colorFrames,
                 onToggleColorFrames = { colorFrames = !colorFrames },
                 modifier = Modifier
@@ -866,6 +873,8 @@ private fun CaptureHud(
     onToggleDistortion: () -> Unit,
     refinementEnabled: Boolean,
     onToggleRefinement: () -> Unit,
+    seamEnabled: Boolean,
+    onToggleSeams: () -> Unit,
     colorFrames: Boolean,
     onToggleColorFrames: () -> Unit,
     modifier: Modifier = Modifier,
@@ -947,6 +956,13 @@ private fun CaptureHud(
                     TextButton(onClick = onToggleRefinement) {
                         Text(
                             text = "Refine: ${if (refinementEnabled) "on" else "off"}",
+                            color = Color.White.copy(alpha = 0.8f),
+                            style = MaterialTheme.typography.labelMedium,
+                        )
+                    }
+                    TextButton(onClick = onToggleSeams) {
+                        Text(
+                            text = "Seam: ${if (seamEnabled) "on" else "off"}",
                             color = Color.White.copy(alpha = 0.8f),
                             style = MaterialTheme.typography.labelMedium,
                         )
@@ -1402,6 +1418,7 @@ private fun StitchProgress.label(): String = when (stage) {
     StitchStage.Preparing -> stringResource(R.string.stitch_stage_preparing)
     StitchStage.Reading -> stringResource(R.string.stitch_stage_reading, completed, total)
     StitchStage.Refining -> stringResource(R.string.stitch_stage_refining, completed, total)
+    StitchStage.Seaming -> stringResource(R.string.stitch_stage_seaming)
     StitchStage.Stitching -> stringResource(R.string.stitch_stage_stitching)
     StitchStage.Projecting -> stringResource(R.string.stitch_stage_projecting)
 }
@@ -1474,6 +1491,7 @@ private fun stitchDiagnostics(
     optics: SphereOptics,
     distortionApplied: Boolean,
     refinementApplied: Boolean,
+    seamsApplied: Boolean,
 ): String {
     val poses = frames.joinToString(separator = "\n") { frame ->
         val exif = runCatching {
@@ -1500,6 +1518,7 @@ private fun stitchDiagnostics(
         "rotation=${optics.portraitRotationDegrees}°\n" +
         "Distortion k: $distortion ${if (distortionApplied) "applied" else "OFF (pinhole)"}\n" +
         "Refinement: ${if (refinementApplied) "on" else "off (sensor poses)"}\n" +
+        "Seams: ${if (seamsApplied) "on (carved)" else "off (blend)"}\n" +
         "Frames (capture order):\n$poses"}
 
 /** Writes one frame to the session's cache directory and buffers it.

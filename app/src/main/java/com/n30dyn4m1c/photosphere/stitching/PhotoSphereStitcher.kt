@@ -103,6 +103,9 @@ enum class StitchStage {
     /** Matching features between overlapping frames and correcting the poses. */
     Refining,
 
+    /** Finding the seam lines the overlaps will be cut along. */
+    Seaming,
+
     /** Projecting frames onto the sphere and blending the overlaps. */
     Stitching,
 
@@ -113,10 +116,11 @@ enum class StitchStage {
 /**
  * How far along a stitch is.
  *
-     * [StitchStage.Reading], [StitchStage.Refining] and [StitchStage.Stitching]
-     * all report real progress — one frame, one edge and one band of canvas at
-     * a time. The short stages either side leave [fraction] null, and the UI
-     * shows an indeterminate spinner for those rather than a bar that lies.
+     * [StitchStage.Reading], [StitchStage.Refining], [StitchStage.Seaming] and
+     * [StitchStage.Stitching] all report real progress — one frame, one edge,
+     * one seam and one band of canvas at a time. The short stages either side
+     * leave [fraction] null, and the UI shows an indeterminate spinner for
+     * those rather than a bar that lies.
      */
 data class StitchProgress(
     val stage: StitchStage,
@@ -300,6 +304,12 @@ object PhotoSphereStitcher {
      * model the refinement assumes. Pass true to let image content correct the
      * measured poses where the features agree.
      *
+     * [useSeams] opts into seam carving: instead of the wide cross-fade, every
+     * pixel is painted by the single frame the graph-cut [SeamFinder] assigns
+     * it, and only a few pixels across each cut blend the loser in — sharper
+     * overlaps at the price of a little compute and a seam that is only as
+     * good as the frames agree.
+     *
      * [onProgress] is called from the stitching thread, not the main one — hand
      * the value to a `StateFlow` or post it rather than writing Compose state
      * from it directly.
@@ -317,6 +327,7 @@ object PhotoSphereStitcher {
         pivot: PivotModel = PivotModel.None,
         portraitRotationDegrees: Int = 90,
         useRefinement: Boolean = false,
+        useSeams: Boolean = false,
         debugColorFrames: Boolean = false,
         longitudeSpanDegrees: Float = 360f,
         centerLongitudeDegrees: Float = 0f,
@@ -528,15 +539,50 @@ object PhotoSphereStitcher {
             }
 
             ensureActive()
-            onProgress(StitchProgress(StitchStage.Stitching))
-            // Captured rather than called inside the lambda: the renderer is not
-            // a suspending function, so the context has to be carried in.
+            // Captured rather than called inside the lambdas below: the seam
+            // finder and the renderer are not suspending functions, so the
+            // context has to be carried in.
             val context = currentCoroutineContext()
+
+            // Seam carving: decide which frame paints each pixel, then render
+            // with the wide cross-fade replaced by a near-hard cut that fades
+            // only a few pixels across it. Without it the render falls back to
+            // the multi-band blend.
+            val seams = if (useSeams) {
+                onProgress(StitchProgress(StitchStage.Seaming))
+                SeamFinder.computeSeams(
+                    frames = prepared,
+                    canvasWidth = canvasWidth,
+                    canvasHeight = canvasHeight,
+                    gains = refinement.gains,
+                    pivotRatio = pivot.ratio,
+                    longitudeSpanDegrees = longitudeSpanDegrees,
+                    centerLongitudeDegrees = centerLongitudeDegrees,
+                    latitudeSpanDegrees = latitudeSpanDegrees,
+                    centerLatitudeDegrees = centerLatitudeDegrees,
+                    onProgress = { completed, total ->
+                        onProgress(StitchProgress(StitchStage.Seaming, completed, total))
+                    },
+                    checkCancelled = { context.ensureActive() },
+                )
+            } else {
+                null
+            }
+            if (BuildConfig.DEBUG && seams != null) {
+                Log.i(
+                    TAG,
+                    "Seam carving: ${seams.gridWidth}x${seams.gridHeight} grid at scale " +
+                        "${seams.scale} over ${prepared.size} frames",
+                )
+            }
+
+            onProgress(StitchProgress(StitchStage.Stitching))
             val rendered = EquirectangularRenderer.render(
                 frames = prepared,
                 canvasWidth = canvasWidth,
                 canvasHeight = canvasHeight,
                 gains = refinement.gains,
+                seams = seams,
                 pivotRatio = pivot.ratio,
                 longitudeSpanDegrees = longitudeSpanDegrees,
                 centerLongitudeDegrees = centerLongitudeDegrees,
