@@ -20,22 +20,22 @@ import androidx.camera.camera2.interop.Camera2Interop
  * colour temperatures, and no amount of blending can hide that. So the session
  * holds them all — AE lock pins the ISO and shutter speed the HAL converged on
  * when the preview started, AWB lock pins the colour temperature, and focus is
- * fixed so nothing re-focuses mid-sweep. This is the same model GCam's
- * Photosphere uses: lock exposure and focus to the first frame, then sweep.
+ * locked on the scene (by tap, or the first scene's centre) so nothing
+ * re-focuses mid-sweep. This is the same model GCam's Photosphere uses: lock
+ * exposure and focus, then sweep.
  *
- * The one thing that varies per device is *how* focus is fixed, because not
- * every lens advertises `AF_MODE_OFF`:
+ * The one thing that varies per device is *how* focus is fixed:
  *
- * - [FocusMode.FIXED_INFINITY] — the lens supports `AF_MODE_OFF`, so focus is
- *   parked at infinity (0 diopters) for the whole session. Sharpest for the
- *   wide, far scenes a sphere is built from, and completely immune to focus
- *   hunting.
+ * - [FocusMode.FOCUS_POINT] — the default for any lens that can focus. The
+ *   session runs `AF_MODE_AUTO`, and the user taps the viewfinder to aim focus
+ *   at a scene region; the sweep converges there and the lens holds that
+ *   distance for the rest of the session, exactly like a regular camera's
+ *   tap-to-focus lock. Until the first tap the lens holds the centre of the
+ *   first scene it saw. This is what keeps frames sharp: focus is *locked on
+ *   what the scene actually is* rather than parked at infinity, which reads as
+ *   blur on any scene with something nearer than the horizon.
  * - [FocusMode.FIXED_FOCUS] — the lens physically has no focus mechanism
  *   (`LENS_INFO_MINIMUM_FOCUS_DISTANCE` is 0); `AF_MODE_OFF` is all there is.
- * - [FocusMode.LOCK_ON_FIRST] — a lens that cannot be switched off is put in
- *   `AF_MODE_AUTO` and triggered once before the first frame, which leaves it
- *   locked on the first scene for the rest of the session (GCam's tap-to-focus
- *   behaviour).
  */
 data class SphereCaptureProfile(
     val focusMode: FocusMode,
@@ -51,31 +51,32 @@ data class SphereCaptureProfile(
  * without qualification.
  */
 enum class FocusMode {
-    /** `AF_MODE_OFF` + `LENS_FOCUS_DISTANCE = 0` (infinity), held the whole time. */
-    FIXED_INFINITY,
-
     /** The lens has no focus mechanism; `AF_MODE_OFF` is mandatory. */
     FIXED_FOCUS,
 
-    /** `AF_MODE_AUTO`, triggered once on the first scene and then held. */
-    LOCK_ON_FIRST,
+    /**
+     * Tap-to-focus: `AF_MODE_AUTO`, triggered where the user taps and then held.
+     *
+     * The lens stays locked on that distance until the next tap — no frame
+     * re-focuses mid-sweep, so a sphere's frames keep one focal plane, and the
+     * shots are sharp on the scene instead of parked at infinity.
+     */
+    FOCUS_POINT,
 }
 
 /**
- * The focus strategy for a lens that advertises the given AF modes.
+ * The focus strategy for a lens.
  *
  * [minimumFocusDistance] is `LENS_INFO_MINIMUM_FOCUS_DISTANCE`: 0 means the
  * lens is fixed-focus and has nothing to lock; anything else means it can
- * focus, and `AF_MODE_OFF` is the deterministic way to hold it still.
+ * focus, and tap-to-focus is the way to lock it on the scene.
  */
-internal fun resolveFocusMode(
-    afModes: IntArray?,
-    minimumFocusDistance: Float?,
-): FocusMode = when {
-    minimumFocusDistance != null && minimumFocusDistance <= 0f -> FocusMode.FIXED_FOCUS
-    afModes?.contains(CaptureRequest.CONTROL_AF_MODE_OFF) == true -> FocusMode.FIXED_INFINITY
-    else -> FocusMode.LOCK_ON_FIRST
-}
+internal fun resolveFocusMode(minimumFocusDistance: Float?): FocusMode =
+    if (minimumFocusDistance != null && minimumFocusDistance <= 0f) {
+        FocusMode.FIXED_FOCUS
+    } else {
+        FocusMode.FOCUS_POINT
+    }
 
 /**
  * Whether AE/AWB locks are worth setting.
@@ -95,7 +96,7 @@ internal fun resolveOpticalStabilization(stabilizationModes: IntArray?): Boolean
  * The capture profile for this device's rear camera.
  *
  * Deliberately does not throw: a camera that will not describe itself gets the
- * most conservative profile (locks everything, locks focus on the first frame)
+ * most conservative profile (locks everything, tap-to-focus on the first scene)
  * rather than failing capture.
  */
 internal fun resolveSphereCaptureProfile(
@@ -106,7 +107,6 @@ internal fun resolveSphereCaptureProfile(
         runCatching { backCameraCharacteristics(context, profile) }.getOrNull()
     return SphereCaptureProfile(
         focusMode = resolveFocusMode(
-            afModes = characteristics?.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES),
             minimumFocusDistance =
                 characteristics?.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE),
         ),
@@ -226,22 +226,16 @@ internal fun applySphereCaptureOptions(
         extender.setCaptureRequestOption(CaptureRequest.CONTROL_AWB_LOCK, true)
     }
     when (profile.focusMode) {
-        FocusMode.FIXED_INFINITY -> {
-            extender.setCaptureRequestOption(
-                CaptureRequest.CONTROL_AF_MODE,
-                CaptureRequest.CONTROL_AF_MODE_OFF,
-            )
-            // 0 diopters is infinity; without it the HAL keeps whatever distance
-            // the last AF run left behind.
-            extender.setCaptureRequestOption(CaptureRequest.LENS_FOCUS_DISTANCE, 0f)
-        }
         FocusMode.FIXED_FOCUS -> {
             extender.setCaptureRequestOption(
                 CaptureRequest.CONTROL_AF_MODE,
                 CaptureRequest.CONTROL_AF_MODE_OFF,
             )
         }
-        FocusMode.LOCK_ON_FIRST -> {
+        FocusMode.FOCUS_POINT -> {
+            // AUTO + a tap trigger is how a regular camera locks focus on an
+            // area: the sweep converges and the lens holds that distance until
+            // the next trigger, so no frame re-focuses mid-sweep.
             extender.setCaptureRequestOption(
                 CaptureRequest.CONTROL_AF_MODE,
                 CaptureRequest.CONTROL_AF_MODE_AUTO,

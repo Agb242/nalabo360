@@ -282,13 +282,13 @@ some phones describe loosely; overestimating it by a tenth spaces the targets a
 tenth too far apart, and the overlap is the first thing to be eaten. Spending a
 few extra frames is the cheaper mistake.
 
-**Ring or sphere.** `SphereCaptureScope` decides how many rings get laid out.
-**Ring** walks the horizon alone — a dozen-odd frames instead of forty, which is
-what most scenes actually want — and **Full sphere** walks rings out to both
-poles. The switch sits in the capture HUD until the first frame lands, after
-which the plan is fixed. It is not a commitment either way: the first ring of a
-sphere run *is* the ring run, so a sphere capture can be stitched the moment its
-horizon closes, and the HUD says which ring it is on so that moment is visible.
+**One plan, inferred coverage.** There is no ring-or-sphere choice to make.
+`SphereCaptureScope.Sphere` lays rings out to both poles and the HUD walks them
+in order; coverage is inferred from the frames as they land, and the run can be
+stitched at any point — three overlapping frames are already a panorama. Stop
+early for a partial sphere (black where it was never shot), or walk the whole
+plan for a full one. The HUD counts bands so "the horizon is closed" is a
+visible moment rather than a guess.
 
 **Where a marker goes on screen.** [`SphereProjection`](app/src/main/java/com/n30dyn4m1c/photosphere/camera/SphereProjection.kt)
 rotates a target's direction out of the world frame into the camera's own frame
@@ -312,6 +312,17 @@ readings as unreliable, and the attitude stamped onto each frame is the mean
 over the dwell rather than a single sample — both take the jitter out of the
 pose the stitcher starts from. On success the shutter sound and a haptic tick
 fire together, the marker turns green, and focus animates onto the next target.
+
+**Tap to focus, locked for the session.** Phone lenses have a fixed physical
+aperture, so there is no f-stop to dial — focus is what changes, and it was
+being parked at infinity, which reads as blur on any scene with something nearer
+than the horizon. The session now runs tap-to-focus instead: tap anywhere on the
+viewfinder to aim the lens at that part of the scene (a focus square appears and
+turns green when it locks), and the lens holds that distance for the whole run —
+exactly like a regular camera's tap-to-focus lock, and exactly what a sphere
+needs, because no frame re-focuses mid-sweep. Until the first tap the lens holds
+the centre of the first scene it saw. AE and AWB stay locked for consistency, so
+the only thing a tap ever moves is focus.
 
 **Frames** are written full-resolution to the session's cache directory with the
 capture attitude stamped into EXIF `UserComment`, giving the stitcher a starting

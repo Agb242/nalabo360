@@ -21,19 +21,26 @@ import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
@@ -56,13 +63,19 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -160,14 +173,16 @@ fun PhotoSphereCameraScreen(
     val optics = rememberSphereOptics(boundCameraId, streamAspectRatio)
     val fieldOfView = optics.fieldOfView
 
-    // A ring is one band of sphere around the horizon; the full plan walks
-    // rings out to both poles. Read live inside the capture loop rather than
-    // captured when it starts, so switching does not have to restart the camera.
-    var isRingCapture by rememberSaveable { mutableStateOf(false) }
-    val captureScope =
-        if (isRingCapture) SphereCaptureScope.Ring else SphereCaptureScope.Sphere
+    // The plan always walks the whole sphere — rings from the horizon out to
+    // both poles. There is no scope for the user to choose: coverage is
+    // inferred from the frames as they land, and the run can be stitched at
+    // any point, so the jobs left to the user are just aim, hold, and shoot.
     val currentFieldOfView by rememberUpdatedState(fieldOfView)
-    val currentScope by rememberUpdatedState(captureScope)
+
+    // Where focus is aimed and whether the lens has locked there. Set by the
+    // initial centre lock once the camera binds, then re-aimed by every tap on
+    // the viewfinder.
+    var focusReticle by remember { mutableStateOf<FocusReticle?>(null) }
 
     val previewView = remember(context) {
         PreviewView(context).apply {
@@ -191,6 +206,26 @@ fun PhotoSphereCameraScreen(
     var activeIndex by remember { mutableIntStateOf(0) }
     var isHolding by remember { mutableStateOf(false) }
     var accuracy by remember { mutableStateOf(OrientationAccuracy.Unknown) }
+
+    /**
+     * Runs a focus sweep at a normalised point in the preview and locks the
+     * lens there once it converges.
+     *
+     * This is tap-to-focus: AE and AWB are already locked by the session, so a
+     * tap only moves focus. In `AF_MODE_AUTO` the lens holds the converged
+     * distance until the next trigger, which is what keeps every frame of the
+     * sphere on one focal plane — and what keeps the shots sharp on the actual
+     * scene rather than parked at infinity.
+     */
+    fun lockFocusAt(nx: Float, ny: Float) {
+        val camera = boundCamera
+        if (camera == null) return
+        focusReticle = FocusReticle(x = nx, y = ny, isWorking = true, isLocked = false)
+        scope.launch {
+            val ran = runCatching { camera.focusAt(nx, ny, previewView) }.getOrDefault(false)
+            focusReticle = FocusReticle(x = nx, y = ny, isWorking = false, isLocked = ran)
+        }
+    }
 
     // A one-time reminder of how to stand, shown before the first frame falls
     // so the capture that follows is built on a steady pivot.
@@ -346,12 +381,13 @@ fun PhotoSphereCameraScreen(
         val poseWindow = ArrayDeque<OrientationData>()
         val poseWindowSize = 20
 
-        // Devices that cannot park focus at infinity hold it at the first scene
-        // instead. AE and AWB are already locked by the session, so this pins
+        // Until the user taps, focus holds the centre of the first scene the
+        // lens saw. AE and AWB are already locked by the session, so this pins
         // the last free variable before any frame is taken; the trigger lands
-        // before the first dwell can complete, so it cannot race a shutter.
-        if (profile.focusMode == FocusMode.LOCK_ON_FIRST) {
-            runCatching { boundCamera?.lockFocusOnCenter(previewView) }
+        // before the first dwell can complete, so it cannot race a shutter. On
+        // a fixed-focus lens there is nothing to aim, and tapping is a no-op.
+        if (profile.focusMode == FocusMode.FOCUS_POINT) {
+            lockFocusAt(0.5f, 0.5f)
         }
 
         tracker.orientation.collect { orientation ->
@@ -372,7 +408,6 @@ fun PhotoSphereCameraScreen(
                 ?: SphereTargetPlan.createForFieldOfView(
                     startYawDegrees = orientation.yawDegrees,
                     fieldOfView = currentFieldOfView,
-                    scope = currentScope,
                 ).also { plan = it }
 
             val target = currentPlan.getOrNull(activeIndex)
@@ -445,13 +480,11 @@ fun PhotoSphereCameraScreen(
         }
     }
 
-    // A plan is laid out from the optics and the scope, so both changing has to
-    // throw it away and start again. Only while the session is still empty:
-    // re-planning around captured frames would renumber the targets they were
-    // shot against. Both changes happen before the first frame in practice —
-    // the optics settle as the camera binds, and the scope toggle is only
-    // offered until capture starts.
-    LaunchedEffect(fieldOfView, captureScope) {
+    // A plan is laid out from the optics, so a change has to throw it away and
+    // start again. Only while the session is still empty: re-planning around
+    // captured frames would renumber the targets they were shot against. The
+    // optics settle as the camera binds, before the first frame in practice.
+    LaunchedEffect(fieldOfView) {
         if (buffer.frames.value.isEmpty()) {
             plan = null
             activeIndex = 0
@@ -567,12 +600,40 @@ fun PhotoSphereCameraScreen(
         )
     }
 
+    // What the focus badge says. FOCUS_POINT starts as an invitation to tap and
+    // settles on "locked" once the first sweep has converged.
+    val lockBadge: String? = when (captureProfile?.focusMode) {
+        FocusMode.FIXED_FOCUS -> stringResource(R.string.capture_lock_fixed)
+        FocusMode.FOCUS_POINT -> when {
+            focusReticle == null -> stringResource(R.string.capture_lock_hint)
+            focusReticle?.isWorking == true -> stringResource(R.string.capture_lock_focusing)
+            else -> stringResource(R.string.capture_lock_locked)
+        }
+        null -> null
+    }
+
     Scaffold(
         modifier = modifier.fillMaxSize(),
         containerColor = Color.Black,
         snackbarHost = { SnackbarHost(snackbarHostState) },
     ) { insets ->
-        Box(modifier = Modifier.fillMaxSize()) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                // Tap-to-focus: a tap anywhere on the viewfinder aims and locks
+                // the lens on that part of the scene. The buttons and the
+                // instructions card sit on top and consume their own taps.
+                .pointerInput(captureProfile) {
+                    detectTapGestures { offset ->
+                        if (captureProfile?.focusMode == FocusMode.FOCUS_POINT) {
+                            lockFocusAt(
+                                (offset.x / size.width).coerceIn(0f, 1f),
+                                (offset.y / size.height).coerceIn(0f, 1f),
+                            )
+                        }
+                    }
+                },
+        ) {
             AndroidView(
                 modifier = Modifier.fillMaxSize(),
                 factory = { previewView },
@@ -586,12 +647,15 @@ fun PhotoSphereCameraScreen(
                 fieldOfView = fieldOfView,
             )
 
+            FocusReticleOverlay(
+                focus = focusReticle,
+                modifier = Modifier.fillMaxSize(),
+            )
+
             if (showInstructions && activeIndex == 0 && bufferedFrames.isEmpty()) {
                 CaptureInstructions(
                     onDismiss = { showInstructions = false },
-                    modifier = Modifier
-                        .align(Alignment.Center)
-                        .padding(horizontal = 28.dp),
+                    modifier = Modifier.fillMaxSize(),
                 )
             }
 
@@ -610,22 +674,13 @@ fun PhotoSphereCameraScreen(
                     completedRings = completedRings,
                     ringCount = ringCount,
                 ),
-                lockBadge = when (captureProfile?.focusMode) {
-                    FocusMode.FIXED_INFINITY -> stringResource(R.string.capture_lock_infinity)
-                    FocusMode.LOCK_ON_FIRST -> stringResource(R.string.capture_lock_first)
-                    FocusMode.FIXED_FOCUS -> stringResource(R.string.capture_lock_fixed)
-                    null -> null
-                },
+                lockBadge = lockBadge,
                 isComplete = isComplete,
                 // Three overlapping frames are already a panorama. Whether one
                 // is worth keeping is the user's call, made on the result
                 // screen; the button's job is not to stand between them and it.
                 canStitch = bufferedFrames.size >= PhotoSphereStitcher.MIN_FRAMES &&
                     stitchJob == null,
-                // Switching scope re-lays the plan, so it is only offered while
-                // there is nothing captured that the plan would renumber.
-                captureScope = if (bufferedFrames.isEmpty()) captureScope else null,
-                onCaptureScopeChange = { isRingCapture = it == SphereCaptureScope.Ring },
                 onFinish = { startStitch() },
                 onRestart = {
                     resetGuidance()
@@ -640,11 +695,12 @@ fun PhotoSphereCameraScreen(
 }
 
 /**
- * Frame counter, progress bar, and the one line of guidance the user needs.
+ * The capture HUD: a glass progress pill up top, the focus lock chip, the one
+ * line of guidance the user needs, and the action that finishes a run.
  *
- * [captureScope] doubles as the switch's visibility: non-null offers the choice
- * between a ring and a whole sphere, null means capture has started and the plan
- * is no longer the user's to change.
+ * Designed to sit over a live viewfinder, so every surface is translucent dark
+ * glass with high-contrast text, and the chrome is limited to what the
+ * workflow needs: aim, hold, shoot, and stop once the area is covered.
  */
 @Composable
 private fun CaptureHud(
@@ -656,62 +712,40 @@ private fun CaptureHud(
     lockBadge: String?,
     isComplete: Boolean,
     canStitch: Boolean,
-    captureScope: SphereCaptureScope?,
-    onCaptureScopeChange: (SphereCaptureScope) -> Unit,
     onFinish: () -> Unit,
     onRestart: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Box(modifier = modifier) {
+        // A soft scrim keeps the top chrome readable over a bright sky.
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .fillMaxWidth()
+                .height(200.dp)
+                .background(
+                    Brush.verticalGradient(
+                        listOf(Color.Black.copy(alpha = 0.55f), Color.Transparent),
+                    )
+                ),
+        )
+
         Column(
             modifier = Modifier
                 .align(Alignment.TopCenter)
                 .fillMaxWidth()
-                .padding(horizontal = 24.dp, vertical = 16.dp),
+                .padding(horizontal = 24.dp, vertical = 18.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Text(
-                text = stringResource(R.string.capture_progress, capturedCount, totalTargets),
-                style = MaterialTheme.typography.titleMedium,
-                color = Color.White,
+            CaptureProgressPill(
+                capturedCount = capturedCount,
+                totalTargets = totalTargets,
+                completedRings = completedRings,
+                ringCount = ringCount,
             )
-            if (totalTargets > 0) {
-                LinearProgressIndicator(
-                    progress = { capturedCount.toFloat() / totalTargets },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(50)),
-                    color = Color(0xFF3DDC84),
-                    trackColor = Color.White.copy(alpha = 0.25f),
-                )
-            }
-            // Only worth saying when there is more than one band to be part way
-            // through; a ring capture is its own progress bar.
-            if (ringCount > 1) {
-                Text(
-                    text = stringResource(R.string.capture_rings, completedRings, ringCount),
-                    style = MaterialTheme.typography.labelMedium,
-                    color = Color.White.copy(alpha = 0.75f),
-                )
-            }
             if (lockBadge != null) {
-                Text(
-                    text = lockBadge,
-                    style = MaterialTheme.typography.labelMedium,
-                    color = Color(0xFF8BC34A),
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(50))
-                        .background(Color.Black.copy(alpha = 0.45f))
-                        .padding(horizontal = 10.dp, vertical = 4.dp),
-                )
-            }
-            if (captureScope != null) {
-                CaptureScopeSwitch(
-                    selected = captureScope,
-                    onSelect = onCaptureScopeChange,
-                    modifier = Modifier.padding(top = 4.dp),
-                )
+                FocusLockChip(text = lockBadge)
             }
         }
 
@@ -719,31 +753,39 @@ private fun CaptureHud(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
-                .padding(horizontal = 24.dp, vertical = 32.dp),
+                .padding(horizontal = 24.dp, vertical = 26.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(16.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            Text(
-                text = hint,
-                style = MaterialTheme.typography.bodyLarge,
-                color = Color.White,
-                textAlign = TextAlign.Center,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(Color.Black.copy(alpha = 0.45f))
-                    .padding(horizontal = 16.dp, vertical = 10.dp),
-            )
-            // Offered as soon as there is enough to stitch, not only at the end:
-            // a user who has covered what they care about should not have to
-            // walk the remaining targets to get a sphere out of it.
+            HintCard(text = hint)
+            // Offered as soon as there is enough to stitch, not only at the
+            // end: a user who has covered what they care about should not have
+            // to walk the remaining targets to get a sphere out of it.
             if (canStitch) {
-                Button(onClick = onFinish) {
-                    Text(stringResource(R.string.capture_finish_stitch))
+                Button(
+                    onClick = onFinish,
+                    shape = RoundedCornerShape(50),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = CaptureAccent,
+                        contentColor = Color.Black,
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(54.dp),
+                ) {
+                    Text(
+                        text = stringResource(R.string.capture_finish_stitch),
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                    )
                 }
             }
             if (isComplete) {
-                Button(onClick = onRestart) {
-                    Text(stringResource(R.string.capture_restart))
+                TextButton(onClick = onRestart) {
+                    Text(
+                        text = stringResource(R.string.capture_restart),
+                        color = Color.White.copy(alpha = 0.9f),
+                    )
                 }
             }
         }
@@ -751,93 +793,273 @@ private fun CaptureHud(
 }
 
 /**
- * Picks how much of the sphere this run is aiming at.
+ * The translucent pill that reports how much of the sphere is covered.
  *
- * Only offered before the first frame, because the choice is what the plan is
- * laid out from. It is not a commitment either way — a sphere run can be
- * stitched the moment its first ring closes — but starting in [SphereCaptureScope.Ring]
- * makes the progress bar count against something a dozen frames long instead of
- * forty, which is the difference between finishing a capture and abandoning one.
+ * [ringCount] is shown only when the plan has more than one band, so a
+ * single-band run reads as a plain frame count rather than "band 0 of 1".
  */
 @Composable
-private fun CaptureScopeSwitch(
-    selected: SphereCaptureScope,
-    onSelect: (SphereCaptureScope) -> Unit,
+private fun CaptureProgressPill(
+    capturedCount: Int,
+    totalTargets: Int,
+    completedRings: Int,
+    ringCount: Int,
     modifier: Modifier = Modifier,
 ) {
-    Row(
+    Surface(
         modifier = modifier,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        shape = RoundedCornerShape(50),
+        color = Color.Black.copy(alpha = 0.5f),
+        shadowElevation = 8.dp,
     ) {
-        SphereCaptureScope.entries.forEach { scope ->
-            FilterChip(
-                selected = scope == selected,
-                onClick = { onSelect(scope) },
-                label = {
-                    Text(
-                        stringResource(
-                            when (scope) {
-                                SphereCaptureScope.Ring -> R.string.capture_scope_ring
-                                SphereCaptureScope.Sphere -> R.string.capture_scope_sphere
-                            }
-                        )
-                    )
-                },
-                colors = FilterChipDefaults.filterChipColors(
-                    containerColor = Color.Black.copy(alpha = 0.45f),
-                    labelColor = Color.White,
-                    selectedContainerColor = Color(0xFF3DDC84),
-                    selectedLabelColor = Color.Black,
-                ),
+        Column(
+            modifier = Modifier.padding(horizontal = 22.dp, vertical = 10.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Text(
+                    text = "$capturedCount",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White,
+                )
+                Text(
+                    text = "/ $totalTargets",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Medium,
+                    color = Color.White.copy(alpha = 0.6f),
+                )
+                Text(
+                    text = stringResource(R.string.capture_progress_frames),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color.White.copy(alpha = 0.6f),
+                )
+            }
+            if (totalTargets > 0) {
+                LinearProgressIndicator(
+                    progress = { capturedCount.toFloat() / totalTargets },
+                    modifier = Modifier
+                        .padding(top = 7.dp)
+                        .fillMaxWidth(0.75f)
+                        .height(3.dp)
+                        .clip(RoundedCornerShape(50)),
+                    color = CaptureAccent,
+                    trackColor = Color.White.copy(alpha = 0.25f),
+                )
+            }
+            if (ringCount > 1) {
+                Text(
+                    text = stringResource(R.string.capture_rings, completedRings, ringCount),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color.White.copy(alpha = 0.7f),
+                    modifier = Modifier.padding(top = 6.dp),
+                )
+            }
+        }
+    }
+}
+
+/** The small status chip that says what the lens is doing. */
+@Composable
+private fun FocusLockChip(
+    text: String,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(50),
+        color = Color.Black.copy(alpha = 0.5f),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(6.dp)
+                    .clip(RoundedCornerShape(50))
+                    .background(CaptureAccent),
+            )
+            Text(
+                text = text,
+                style = MaterialTheme.typography.labelMedium,
+                color = Color.White.copy(alpha = 0.85f),
             )
         }
     }
 }
 
+/** The single line of guidance, in a glass card over the bottom of the frame. */
+@Composable
+private fun HintCard(
+    text: String,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(16.dp),
+        color = Color.Black.copy(alpha = 0.5f),
+        shadowElevation = 6.dp,
+    ) {
+        Text(
+            text = text,
+            style = MaterialTheme.typography.bodyLarge,
+            color = Color.White,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.padding(horizontal = 18.dp, vertical = 12.dp),
+        )
+    }
+}
+
+/** The accent used across the capture chrome: a confident photographic green. */
+private val CaptureAccent = Color(0xFF3DDC84)
+
 /**
- * The one-shot reminder shown before the first frame.
+ * The one-shot welcome shown before the first frame.
  *
- * A floating card rather than a modal dialog: it sits over the viewfinder
- * without taking focus or pausing the camera, and a single tap dismisses it for
- * the session. A sphere is only as steady as the pivot it was shot on, so the
- * points are about stance and stillness, not about the controls.
+ * A dimmed overlay with a floating card, rather than a modal dialog: it sits
+ * over the viewfinder without taking focus or pausing the camera, and a single
+ * tap anywhere dismisses it for the session. The steps are the whole workflow
+ * — stay put, aim and hold, tap to focus, cover the scene — so the user never
+ * has to learn a control to shoot a sphere.
  */
 @Composable
 private fun CaptureInstructions(
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Surface(
-        modifier = modifier,
-        shape = RoundedCornerShape(20.dp),
-        color = Color.Black.copy(alpha = 0.82f),
-        tonalElevation = 6.dp,
+    val appear = remember { Animatable(0f) }
+    LaunchedEffect(Unit) {
+        appear.animateTo(1f, animationSpec = tween(280, easing = FastOutSlowInEasing))
+    }
+
+    Box(
+        modifier = modifier
+            .alpha(appear.value)
+            .background(Color.Black.copy(alpha = 0.5f * appear.value))
+            // Tapping anywhere dismisses the card and starts capture.
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onDismiss,
+            ),
+        contentAlignment = Alignment.Center,
     ) {
-        Column(
-            modifier = Modifier.padding(horizontal = 20.dp, vertical = 16.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+        Surface(
+            modifier = Modifier
+                .padding(horizontal = 26.dp)
+                .graphicsLayer {
+                    alpha = appear.value
+                    scaleX = 0.92f + 0.08f * appear.value
+                    scaleY = 0.92f + 0.08f * appear.value
+                },
+            shape = RoundedCornerShape(28.dp),
+            color = Color(0xFF11161A),
+            tonalElevation = 6.dp,
+            shadowElevation = 24.dp,
+        ) {
+            Column(
+                modifier = Modifier.padding(24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(18.dp),
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Text(
+                        text = stringResource(R.string.capture_instructions_title),
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White,
+                    )
+                    Text(
+                        text = stringResource(R.string.capture_instructions_subtitle),
+                        style = MaterialTheme.typography.labelLarge,
+                        color = CaptureAccent,
+                        letterSpacing = 2.sp,
+                    )
+                }
+
+                listOf(
+                    1 to (R.string.capture_step_1 to R.string.capture_instructions_1),
+                    2 to (R.string.capture_step_2 to R.string.capture_instructions_2),
+                    3 to (R.string.capture_step_3 to R.string.capture_instructions_3),
+                    4 to (R.string.capture_step_4 to R.string.capture_instructions_4),
+                ).forEach { (number, step) ->
+                    val (label, detail) = step
+                    InstructionStep(
+                        number = number,
+                        label = stringResource(label),
+                        detail = stringResource(detail),
+                    )
+                }
+
+                Button(
+                    onClick = onDismiss,
+                    shape = RoundedCornerShape(50),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = CaptureAccent,
+                        contentColor = Color.Black,
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(52.dp),
+                ) {
+                    Text(
+                        text = stringResource(R.string.capture_instructions_dismiss),
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** One numbered step of the welcome card. */
+@Composable
+private fun InstructionStep(
+    number: Int,
+    label: String,
+    detail: String,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(32.dp)
+                .clip(RoundedCornerShape(50))
+                .background(CaptureAccent.copy(alpha = 0.18f)),
+            contentAlignment = Alignment.Center,
         ) {
             Text(
-                text = stringResource(R.string.capture_instructions_title),
-                style = MaterialTheme.typography.titleMedium,
+                text = "$number",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold,
+                color = CaptureAccent,
+            )
+        }
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
                 color = Color.White,
             )
-            listOf(
-                R.string.capture_instructions_1,
-                R.string.capture_instructions_2,
-                R.string.capture_instructions_3,
-                R.string.capture_instructions_4,
-            ).forEach { instruction ->
-                Text(
-                    text = stringResource(instruction),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = Color.White.copy(alpha = 0.88f),
-                )
-            }
-            TextButton(onClick = onDismiss) {
-                Text(stringResource(R.string.capture_instructions_dismiss))
-            }
+            Text(
+                text = detail,
+                style = MaterialTheme.typography.bodyMedium,
+                color = Color.White.copy(alpha = 0.75f),
+            )
         }
     }
 }
@@ -1023,20 +1245,26 @@ private suspend fun ImageCapture.saveFrame(
 }
 
 /**
- * Locks autofocus at the centre of the preview, awaiting convergence.
+ * Aims and locks autofocus at a normalised point in the preview, awaiting
+ * convergence.
  *
- * Used on devices without `AF_MODE_OFF`, where focus is the one variable the
- * session cannot pin from the start. AE and AWB are already held by the session
- * request, so the trigger only moves focus — the metering region is the centre
- * of the viewfinder, where the alignment gate insists the next frame be aimed
- * anyway. After the trigger completes in `AF_MODE_AUTO` the lens stays where it
- * is until another trigger comes along, which is what GCam's tap-to-focus lock
- * amounts to.
+ * This is tap-to-focus: AE and AWB are already held by the session request, so
+ * the trigger only moves focus. After the trigger completes in `AF_MODE_AUTO`
+ * the lens stays where it is until another trigger comes along — the same lock
+ * a regular camera's tap-to-focus leaves behind, and the thing that keeps a
+ * sphere's frames on one focal plane.
+ *
+ * @return false when the preview is not laid out yet and no sweep could run.
  */
-private suspend fun Camera.lockFocusOnCenter(previewView: PreviewView) {
+private suspend fun Camera.focusAt(
+    nx: Float,
+    ny: Float,
+    previewView: PreviewView,
+): Boolean {
+    if (previewView.width <= 0 || previewView.height <= 0) return false
     val point = previewView.meteringPointFactory.createPoint(
-        previewView.width / 2f,
-        previewView.height / 2f,
+        previewView.width * nx.coerceIn(0f, 1f),
+        previewView.height * ny.coerceIn(0f, 1f),
     )
     val future = cameraControl.startFocusAndMetering(
         FocusMeteringAction.Builder(point, FocusMeteringAction.FLAG_AF).build(),
@@ -1052,6 +1280,7 @@ private suspend fun Camera.lockFocusOnCenter(previewView: PreviewView) {
             ContextCompat.getMainExecutor(previewView.context),
         )
     }
+    return true
 }
 
 /** Suspending [ImageCapture.takePicture]; the callback form fits nothing here. */

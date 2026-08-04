@@ -128,6 +128,118 @@ fun TargetOverlay(
 }
 
 /**
+ * Where the user has aimed focus, and whether the lens has locked there.
+ *
+ * Positions are normalised to the preview: [x] runs 0..1 from the left and [y]
+ * runs 0..1 from the top, which is what the camera's metering point factory
+ * wants. The reticle stays visible after the lock so it is clear what the
+ * session is focused on, and a second tap simply moves the lock.
+ */
+data class FocusReticle(
+    /** Horizontal aim within the preview, 0..1 from the left. */
+    val x: Float,
+    /** Vertical aim within the preview, 0..1 from the top. */
+    val y: Float,
+    /** A focus sweep is in flight and has not converged yet. */
+    val isWorking: Boolean,
+    /** The lens has converged and is holding this distance. */
+    val isLocked: Boolean,
+)
+
+/**
+ * The tap-to-focus square drawn where the user aimed focus.
+ *
+ * A single rounded square with corner brackets, like a phone camera's focus
+ * box: warm amber while the sweep runs (growing slightly, so the sweep reads
+ * as alive), green once the lens has locked. It is drawn on top of everything
+ * else so it never hides behind the target markers.
+ */
+@Composable
+fun FocusReticleOverlay(
+    focus: FocusReticle?,
+    modifier: Modifier = Modifier,
+) {
+    if (focus == null) return
+
+    val appear = remember { Animatable(0f) }
+    LaunchedEffect(focus.x, focus.y) {
+        appear.snapTo(0f)
+        appear.animateTo(1f, animationSpec = tween(240, easing = FastOutSlowInEasing))
+    }
+
+    Canvas(modifier = modifier.fillMaxSize()) {
+        val color = when {
+            focus.isWorking -> Color(0xFFFFC24B)
+            focus.isLocked -> Color(0xFF3DDC84)
+            else -> Color.White.copy(alpha = 0.9f)
+        }
+
+        val resting = 44.dp.toPx()
+        val sizePx = if (focus.isWorking) {
+            resting * (1f + 0.35f * (1f - appear.value))
+        } else {
+            resting
+        }
+        val half = sizePx / 2f
+        val cx = focus.x * size.width
+        val cy = focus.y * size.height
+        val corner = 14.dp.toPx()
+        val strokeWidth = 2.5.dp.toPx()
+
+        // A soft wash over the focused region while the sweep is deciding.
+        if (focus.isWorking) {
+            drawRect(
+                color = color.copy(alpha = 0.10f),
+                topLeft = Offset(cx - half, cy - half),
+                size = Size(sizePx, sizePx),
+            )
+        }
+
+        drawFocusCorners(
+            cx = cx,
+            cy = cy,
+            half = half,
+            corner = corner,
+            color = color,
+            strokeWidth = strokeWidth,
+        )
+    }
+}
+
+/** Draws the four corner brackets of the focus square. */
+private fun DrawScope.drawFocusCorners(
+    cx: Float,
+    cy: Float,
+    half: Float,
+    corner: Float,
+    color: Color,
+    strokeWidth: Float,
+) {
+    val path = Path()
+    // Top-left.
+    path.moveTo(cx - half, cy - half + corner)
+    path.lineTo(cx - half, cy - half)
+    path.lineTo(cx - half + corner, cy - half)
+    // Top-right.
+    path.moveTo(cx + half - corner, cy - half)
+    path.lineTo(cx + half, cy - half)
+    path.lineTo(cx + half, cy - half + corner)
+    // Bottom-right.
+    path.moveTo(cx + half, cy + half - corner)
+    path.lineTo(cx + half, cy + half)
+    path.lineTo(cx + half - corner, cy + half)
+    // Bottom-left.
+    path.moveTo(cx - half + corner, cy + half)
+    path.lineTo(cx - half, cy + half)
+    path.lineTo(cx - half, cy + half - corner)
+    drawPath(
+        path = path,
+        color = color,
+        style = Stroke(width = strokeWidth, cap = StrokeCap.Round),
+    )
+}
+
+/**
  * Draws every marker: the ones already shot, the ones still to come, and the live one.
  *
  * Each marker is a rectangle the size of one frame's capture footprint, not a

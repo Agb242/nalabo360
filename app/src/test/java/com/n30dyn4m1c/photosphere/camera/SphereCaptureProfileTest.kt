@@ -9,55 +9,30 @@ import org.junit.Test
 class SphereCaptureProfileTest {
 
     @Test
-    fun `a focusable lens that supports off means fixed infinity`() {
-        val modes = intArrayOf(
-            CaptureRequest.CONTROL_AF_MODE_OFF,
-            CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE,
-            CaptureRequest.CONTROL_AF_MODE_AUTO,
-        )
-
+    fun `a focusable lens is captured by tapping to focus`() {
         assertEquals(
-            FocusMode.FIXED_INFINITY,
-            resolveFocusMode(modes, minimumFocusDistance = 0.005f),
+            FocusMode.FOCUS_POINT,
+            resolveFocusMode(minimumFocusDistance = 0.005f),
+        )
+        assertEquals(
+            FocusMode.FOCUS_POINT,
+            resolveFocusMode(minimumFocusDistance = 1f),
         )
     }
 
     @Test
-    fun `a lens that cannot be switched off locks on the first frame`() {
-        val modes = intArrayOf(
-            CaptureRequest.CONTROL_AF_MODE_AUTO,
-            CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE,
-        )
-
+    fun `an unknown camera falls back to tap to focus`() {
         assertEquals(
-            FocusMode.LOCK_ON_FIRST,
-            resolveFocusMode(modes, minimumFocusDistance = 0.005f),
-        )
-    }
-
-    @Test
-    fun `an unknown camera falls back to lock on first frame`() {
-        assertEquals(
-            FocusMode.LOCK_ON_FIRST,
-            resolveFocusMode(afModes = null, minimumFocusDistance = null),
-        )
-        assertEquals(
-            FocusMode.LOCK_ON_FIRST,
-            resolveFocusMode(IntArray(0), minimumFocusDistance = 1f),
+            FocusMode.FOCUS_POINT,
+            resolveFocusMode(minimumFocusDistance = null),
         )
     }
 
     @Test
     fun `a fixed focus lens is never asked to auto focus`() {
-        val modes = intArrayOf(CaptureRequest.CONTROL_AF_MODE_OFF)
-
         assertEquals(
             FocusMode.FIXED_FOCUS,
-            resolveFocusMode(modes, minimumFocusDistance = 0f),
-        )
-        assertEquals(
-            FocusMode.FIXED_FOCUS,
-            resolveFocusMode(null, minimumFocusDistance = 0f),
+            resolveFocusMode(minimumFocusDistance = 0f),
         )
     }
 

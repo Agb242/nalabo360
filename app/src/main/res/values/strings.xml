@@ -13,28 +13,32 @@
     <string name="capture_failed">Capture failed: %1$s</string>
 
     <!-- Guided capture HUD. -->
-    <string name="capture_progress">%1$d / %2$d frames</string>
-    <string name="capture_rings">%1$d of %2$d rings complete</string>
-    <string name="capture_scope_ring">Ring</string>
-    <string name="capture_scope_sphere">Full sphere</string>
-    <string name="capture_lock_infinity">Exposure &amp; white balance locked · focus at infinity</string>
-    <string name="capture_lock_first">Exposure &amp; white balance locked · focus locked</string>
-    <string name="capture_lock_fixed">Exposure &amp; white balance locked · fixed-focus lens</string>
+    <string name="capture_progress_frames">frames</string>
+    <string name="capture_rings">%1$d of %2$d bands</string>
+    <string name="capture_lock_focusing">Focusing…</string>
+    <string name="capture_lock_locked">Focus locked · AE &amp; WB locked</string>
+    <string name="capture_lock_hint">Tap the viewfinder to focus</string>
+    <string name="capture_lock_fixed">Fixed-focus lens</string>
     <string name="capture_hint_search">Move the reticle onto the marker</string>
     <string name="capture_hint_hold">Hold still…</string>
-    <string name="capture_hint_ring_done">Ring %1$d of %2$d done — stitch now, or keep going</string>
+    <string name="capture_hint_ring_done">Band %1$d of %2$d covered — stitch now, or keep going</string>
     <string name="capture_waiting_for_orientation">Finding your bearing…</string>
     <string name="capture_low_accuracy">Compass unreliable — wave the phone in a figure eight</string>
     <string name="capture_orientation_unavailable">This device has no rotation vector sensor, so guided capture is unavailable.</string>
     <string name="capture_sphere_complete">Sphere complete</string>
     <string name="capture_restart">Start a new sphere</string>
     <string name="capture_finish_stitch">Finish &amp; stitch</string>
-    <string name="capture_instructions_title">Before you start</string>
-    <string name="capture_instructions_1">Stand in one spot and rotate your body in place — don\'t walk.</string>
-    <string name="capture_instructions_2">Turn on the spot, keeping the phone at the same height and distance from you.</string>
-    <string name="capture_instructions_3">The shutter fires on its own — pause a moment on each marker.</string>
-    <string name="capture_instructions_4">Avoid blank walls and bright skies, and move slowly.</string>
-    <string name="capture_instructions_dismiss">Got it</string>
+    <string name="capture_instructions_title">Capture your sphere</string>
+    <string name="capture_instructions_subtitle">Aim · Steady · Shoot</string>
+    <string name="capture_step_1">Stay put</string>
+    <string name="capture_step_2">Aim &amp; hold</string>
+    <string name="capture_step_3">Tap to focus</string>
+    <string name="capture_step_4">Good scene</string>
+    <string name="capture_instructions_1">Stand in one spot and turn your body — don\'t walk.</string>
+    <string name="capture_instructions_2">Line the reticle up with each marker and hold still — the shutter fires on its own.</string>
+    <string name="capture_instructions_3">Tap the viewfinder to focus on the scene, just like a regular camera.</string>
+    <string name="capture_instructions_4">Keep the phone at the same height and avoid blank walls and bright skies.</string>
+    <string name="capture_instructions_dismiss">Start capturing</string>
 
     <!-- Stitching. -->
     <string name="stitch_title">Building your sphere</string>
@@ -55,7 +59,8 @@
     <string name="stitch_error_write_failed">The sphere couldn\'t be written to storage. Free up some space and try again.</string>
 
     <!-- Result preview: what happens to a finished sphere. -->
-    <string name="result_title">Your 360 photo</string>
+    <string name="result_title">Your 360° photo</string>
+    <string name="result_badge">360°</string>
     <string name="result_dimensions">%1$d × %2$d · equirectangular</string>
     <string name="result_preview_description">Preview of the stitched 360° photo, flattened</string>
     <string name="result_preview_failed">The preview couldn\'t be shown, but the photo is intact — export or share it to check.</string>
