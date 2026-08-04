@@ -456,6 +456,17 @@ reprojection, but the measured poses are not the last word:
   should be near, and a frame whose content gives no reliable matches keeps its
   measured pose, so a featureless sky or a blank wall degrades gracefully to the
   orientation-driven stitch rather than a failed one.
+- The same matches also sharpen the *field of view*. A focal-length error pulls
+  every bearing radially about the optical axis, so the residual the rotations
+  leave behind carries a measure of it: a per-frame focal correction is solved
+  by least squares from the matched bearings (Brown & Lowe's step) and the
+  stitcher projects through the corrected focal lengths. Frame 0 is anchored —
+  the whole sphere can be uniformly scaled without changing any alignment, so
+  the absolute scale is only defined relative to the frame held still — and
+  corrections are clamped to ±15% and gated behind at least forty agreeing
+  correspondences, so a featureless run keeps the device's reported field of
+  view. The radial distortion is re-normalised against each corrected focal
+  length, so the lens stays the same physical lens at its new focal.
 - Which pairs count as overlapping is a *directional* test rather than a single
   distance threshold: the second frame's aim is projected into the first's
   camera frame and must land within one field of view on both axes. A portrait
@@ -620,11 +631,9 @@ read grant attached.
 
 ## Not implemented yet
 
-- **Focal-length refinement.** The pose refinement assumes the camera's reported
-  focal length is right. It usually is — the optics come from the device's own
-  intrinsic calibration — but solving for a small per-frame focal correction
-  alongside the rotations (Brown & Lowe's step) would absorb the last bit of
-  scale error a loosely-described lens leaves behind.
+- **Focal-length refinement** is implemented — the pose refinement solves a
+  per-frame focal correction from the matched bearings and the stitcher projects
+  through it (see [Stitching](#stitching)).
 - **Multi-band blending** is implemented — overlaps resolve to a Laplacian
   pyramid blend (see above) that fades fine detail over a few pixels and broad
   illumination over the whole overlap.

@@ -166,9 +166,12 @@ data class SphereFrame(
  * The measured poses are not the last word. [PoseRefiner] matches ORB features
  * between overlapping frames and solves for a small per-frame correction on top
  * of the sensor pose — the sensor stays the starting guess and the fallback, and
- * the image content decides the fine alignment. The lens's radial distortion is
- * carried through the whole model (see [RadialDistortion]) so frame edges,
- * where seams live, land where the lens really put them, and
+ * the image content decides the fine alignment. The same matches also refine
+ * the field of view: a per-frame focal scale is solved from the matched
+ * bearings, so the last bit of scale error a loosely-described lens leaves
+ * behind is absorbed before rendering (see [PoseRefiner]). The lens's radial
+ * distortion is carried through the whole model (see [RadialDistortion]) so
+ * frame edges, where seams live, land where the lens really put them, and
  * [ExposureCompensation] equalises per-frame brightness so the blends do not
  * show seams of light.
  *
@@ -477,6 +480,7 @@ object PhotoSphereStitcher {
                     bases = sensor.map { CameraBasis.fromRotationMatrix(it) },
                     gains = FloatArray(decoded.size) { 1f },
                     matchedEdges = 0,
+                    focalScales = DoubleArray(decoded.size) { 1.0 },
                 )
             }
 
@@ -486,10 +490,12 @@ object PhotoSphereStitcher {
                     "y=${p.yawDegrees.roundToInt()}/p=${p.pitchDegrees.roundToInt()}/" +
                         "r=${p.rollDegrees.roundToInt()}"
                 }
+                val focals = refinement.focalScales.map { "%.4f".format(it) }
                 Log.i(
                     TAG,
                     "Refinement matched ${refinement.matchedEdges} edges; " +
-                        "refined poses: ${poses.joinToString(", ")}",
+                        "refined poses: ${poses.joinToString(", ")}; " +
+                        "focal scales: ${focals.joinToString(", ")}",
                 )
             }
 
@@ -497,7 +503,12 @@ object PhotoSphereStitcher {
             decoded.indices.forEach { index ->
                 ensureActive()
                 val basis = refinement.bases[index]
-                val intrinsics = decoded[index].intrinsics
+                // The focal refinement may have decided the reported field of
+                // view was off; the scale is applied to the frame's intrinsics
+                // (and the radial model re-normalised against the new focal
+                // length) so the footprint and the renderer both see the lens
+                // the feature matches measured.
+                val intrinsics = decoded[index].intrinsics.scaledBy(refinement.focalScales[index])
                 prepared += PreparedFrame(
                     image = decoded[index].image,
                     basis = basis,

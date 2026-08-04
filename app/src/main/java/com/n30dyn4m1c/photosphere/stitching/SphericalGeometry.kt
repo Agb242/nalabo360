@@ -218,6 +218,38 @@ data class FrameIntrinsics(
      */
     val focalPx: Double get() = sqrt(focalXPx * focalYPx)
 
+    /**
+     * The same lens with its focal length multiplied by [focalScale].
+     *
+     * This is what pose refinement's focal correction hands down to the
+     * renderer: the per-frame scale that the feature correspondences said the
+     * reported field of view was off by. Both axes are scaled together, because
+     * the correction is a single scale on a single physical lens, and the
+     * radial coefficients are re-normalised against the *new* focal length —
+     * a pixel offset `p` is the focal-normalized offset `p / f`, so the
+     * polynomial in `r²` gains a factor `1 / f^(2·order)` per term
+     * (`k1` by `s²`, `k2` by `s⁴`, `k3` by `s⁶`). Without that the lens would
+     * be described by one focal length and corrected by another, which is
+     * exactly the inconsistency the refinement exists to remove.
+     */
+    fun scaledBy(focalScale: Double): FrameIntrinsics {
+        if (focalScale <= 0.0 || abs(focalScale - 1.0) < 1e-6) return this
+        val scaledRadial = radial?.let { coefficients ->
+            var divisor = focalScale * focalScale
+            val out = DoubleArray(coefficients.size)
+            for (index in coefficients.indices) {
+                out[index] = coefficients[index] / divisor
+                divisor *= focalScale * focalScale
+            }
+            out
+        }
+        return copy(
+            focalXPx = focalXPx * focalScale,
+            focalYPx = focalYPx * focalScale,
+            radial = scaledRadial,
+        )
+    }
+
     companion object {
         /**
          * Intrinsics of a [widthPx] × [heightPx] frame covering the given
