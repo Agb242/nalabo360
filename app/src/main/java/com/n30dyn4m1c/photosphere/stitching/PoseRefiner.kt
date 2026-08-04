@@ -66,11 +66,18 @@ internal object PoseRefiner {
     /** Ratio test: keep a match only if clearly better than the second-best. */
     private const val RATIO_TEST = 0.8f
 
-    /** Below this many matches an edge is not worth solving for. */
-    const val MIN_MATCHES = 24
+    /**
+     * Below this many matches an edge is not worth solving for.
+     *
+     * Deliberately low: the RANSAC result still has to agree with the sensor's
+     * relative rotation within [MAX_SENSOR_DEVIATION_DEGREES], so a sparse but
+     * honest set of matches from a low-texture scene is accepted where a strict
+     * count would hand the whole edge back to the sensor alone.
+     */
+    const val MIN_MATCHES = 16
 
     /** Below this many inliers a rotation estimate is not trusted. */
-    const val MIN_INLIERS = 16
+    const val MIN_INLIERS = 12
 
     /** Inlier agreement for the RANSAC, in degrees. */
     const val RANSAC_THRESHOLD_DEGREES = 2.0

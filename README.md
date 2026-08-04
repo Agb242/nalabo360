@@ -261,26 +261,27 @@ shutter: they move the reticle onto the next marker and hold.
 
 **The target list.** [`SphereTargetPlan`](app/src/main/java/com/n30dyn4m1c/photosphere/camera/SphereTarget.kt)
 lays its rings out to match the device's lens. The yaw gap on the equator is the
-horizontal field of view minus a 35% overlap target, so a wide-angle phone takes
+horizontal field of view minus a 50% overlap target, so a wide-angle phone takes
 fewer, larger frames and a narrow one takes more, smaller ones — every frame
 covers roughly the same slice of the sphere. Ring elevations step up and down
 from the horizon by the same fraction of the *vertical* field of view, and the
 outermost ring always reaches the poles, so no lens leaves an uncovered cap at
 the top or bottom. Yaw spacing widens by `1 / cos(elevation)` so neighbouring
 frames stay a constant *angular* distance apart instead of bunching up as the
-rings shrink. The 35% overlap is what the feature-based pose refinement needs:
-it leaves every frame well inside its neighbours' view (see
-[Stitching](#stitching)). Rings are swept in alternating directions, and the
-whole plan is rotated to start at whatever bearing the user is already facing —
-capture opens with the reticle on the first marker rather than asking for
-magnetic north.
+rings shrink. The 50% overlap is what the feature-based pose refinement needs:
+it leaves every frame well inside its neighbours' view, and is the margin that
+absorbs a field-of-view estimate that runs high and a degree or two of sensor
+drift (see [Stitching](#stitching)). Rings are swept in alternating directions,
+and the whole plan is rotated to start at whatever bearing the user is already
+facing — capture opens with the reticle on the first marker rather than asking
+for magnetic north.
 
-The plan is laid out against 90% of the reported field of view, not all of it
+The plan is laid out against 80% of the reported field of view, not all of it
 (`FIELD_OF_VIEW_SAFETY_FACTOR`). The overlap is only ever as good as the field
 of view it is measured against, and that number is an estimate read off optics
-some phones describe loosely; overestimating it by a tenth spaces the targets a
-tenth too far apart, and the overlap is the first thing to be eaten. Spending a
-few extra frames is the cheaper mistake.
+some phones describe loosely; overestimating it spaces the targets too far
+apart, and the overlap is the first thing to be eaten. Spending a few extra
+frames is the cheaper mistake.
 
 **One plan, inferred coverage.** There is no ring-or-sphere choice to make.
 `SphereCaptureScope.Sphere` lays rings out to both poles and the HUD walks them

@@ -116,12 +116,14 @@ data class SphereTargetPlan(
          *
          * This stitcher refines the measured poses by matching features between
          * overlapping frames, so the overlap has to be wide enough for a
-         * feature-based stitcher to find its bearings — 35% keeps every frame
-         * well inside its neighbours' view while still leaving each one enough
-         * of the sphere to itself. It is also what absorbs capture error: a
-         * small overlap would turn a degree of sensor drift into a missed edge.
+         * feature-based stitcher to find its bearings. Half the field of view
+         * is a deliberately generous target: it is what absorbs the two things
+         * that silently eat the shared band down to nothing — a field of view
+         * estimate that runs high, and a degree or two of sensor drift between
+         * frames. The cost is more frames per ring; the alternative is a run
+         * that only reveals itself as un-stitchable at the end.
          */
-        const val DEFAULT_TARGET_OVERLAP_FRACTION: Float = 0.35f
+        const val DEFAULT_TARGET_OVERLAP_FRACTION: Float = 0.5f
 
         /**
          * Fraction of the reported field of view the plan actually spends.
@@ -131,14 +133,14 @@ data class SphereTargetPlan(
          * describes with varying honesty — a logical multi-camera that lists
          * every lens's focal length, an intrinsic calibration quoted against a
          * different sensor crop than the one being streamed. Overestimating it
-         * by a tenth spaces the targets a tenth too far apart, and the overlap
-         * the stitcher needs is the first thing to be eaten.
+         * spaces the targets too far apart, and the overlap the stitcher needs
+         * is the first thing to be eaten.
          *
-         * So the plan is laid out as though the lens were slightly narrower than
+         * So the plan is laid out as though the lens were a fifth narrower than
          * it claims. The cost is a few more frames; the alternative is a run
          * that only reveals itself as un-stitchable at the end.
          */
-        const val FIELD_OF_VIEW_SAFETY_FACTOR: Float = 0.9f
+        const val FIELD_OF_VIEW_SAFETY_FACTOR: Float = 0.8f
 
         /**
          * Lays out a sphere whose first target sits at [startYawDegrees].

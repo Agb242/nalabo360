@@ -103,7 +103,7 @@ class SphereTargetPlanTest {
         assertTrue("wide lens took more frames", wide.size < narrow.size)
 
         // The equator spacing tracks the lens, so the overlap each frame has
-        // with its neighbour stays near the 25% target rather than piling up.
+        // with its neighbour stays near the 50% target rather than piling up.
         val overlap = { plan: SphereTargetPlan, horizontalFov: Float ->
             val equator = plan.targets.filter { it.elevationDegrees == 0f }
             val separation = angularDistance(equator[0], equator[1])
@@ -112,8 +112,8 @@ class SphereTargetPlanTest {
         // The band is wide because the plan deliberately spends less of the
         // lens than the lens claims (FIELD_OF_VIEW_SAFETY_FACTOR), so the real
         // overlap sits above the nominal target rather than below it.
-        assertTrue("narrow-lens overlap off target", overlap(narrow, 52f) in 0.2f..0.55f)
-        assertTrue("wide-lens overlap off target", overlap(wide, 76f) in 0.2f..0.55f)
+        assertTrue("narrow-lens overlap off target", overlap(narrow, 52f) in 0.45f..0.75f)
+        assertTrue("wide-lens overlap off target", overlap(wide, 76f) in 0.45f..0.75f)
     }
 
     @Test
