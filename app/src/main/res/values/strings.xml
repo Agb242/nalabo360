@@ -28,6 +28,7 @@
     <string name="capture_orientation_unavailable">This device has no rotation vector sensor, so guided capture is unavailable.</string>
     <string name="capture_sphere_complete">Sphere complete</string>
     <string name="capture_restart">Start a new sphere</string>
+    <string name="capture_undo">Undo last shot</string>
     <string name="capture_finish_stitch">Finish &amp; stitch</string>
     <string name="capture_instructions_title">Capture your sphere</string>
     <string name="capture_instructions_subtitle">Aim · Steady · Shoot</string>

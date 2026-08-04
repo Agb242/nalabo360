@@ -260,6 +260,31 @@ class ImageBufferManager(
     }
 
     /**
+     * Drops the most recently captured frame, deleting its file, and returns it.
+     *
+     * Guided capture walks the plan one index at a time, so the newest frame is
+     * always the highest buffered index — this is the "undo that shot" a
+     * StreetView-style capture wants: a frame that came out blurred, or one shot
+     * while something moved through the scene, is removed and its target becomes
+     * the active one again so it can simply be re-shot.
+     *
+     * Returns null when the buffer is empty.
+     */
+    suspend fun undoLastFrame(): BufferedFrame? {
+        val dropped = mutex.withLock {
+            val last = _frames.value.maxByOrNull(BufferedFrame::index) ?: return null
+            _frames.value = _frames.value.filterNot { it == last }
+            last
+        }
+        withContext(NonCancellable + ioDispatcher) {
+            if (dropped.file.exists() && !dropped.file.delete()) {
+                Log.w(TAG, "Could not delete undone frame ${dropped.file.name}")
+            }
+        }
+        return dropped
+    }
+
+    /**
      * Empties the buffer, deleting the frames it was holding.
      *
      * The session id survives, so capture can carry on writing into the same

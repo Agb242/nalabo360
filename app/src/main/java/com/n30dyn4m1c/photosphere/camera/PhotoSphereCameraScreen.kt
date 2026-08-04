@@ -38,10 +38,15 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
@@ -166,6 +171,11 @@ fun PhotoSphereCameraScreen(
     val orientationState = tracker.orientation.collectAsStateWithLifecycle()
     val feedback = rememberCaptureFeedback()
     val deviceProfile = remember { SphereDeviceProfile.forDevice() }
+
+    // Shared between the capture loop and the undo control: both need to reset a
+    // half-completed dwell. Kept at the screen's scope so an undo can reach it
+    // from outside the loop that runs it.
+    val gate = remember { AlignmentGate() }
 
     // Which lens CameraX actually bound, and the shape of the buffer it is
     // producing. Both are only knowable once the bind has resolved, and both
@@ -408,7 +418,9 @@ fun PhotoSphereCameraScreen(
     LaunchedEffect(imageCapture) {
         val capture = imageCapture ?: return@LaunchedEffect
         val profile = captureProfile ?: return@LaunchedEffect
-        val gate = AlignmentGate()
+        // The gate is shared with the undo control, so a fresh camera bind starts
+        // with a clean dwell rather than whatever the previous bind left behind.
+        gate.reset()
 
         // The pose stamped onto each frame is the mean over a short window of
         // samples. The gate has just confirmed the aim held still for a dwell,
@@ -437,6 +449,9 @@ fun PhotoSphereCameraScreen(
             // being stitched, and would be deleted when that set is cleared.
             if (stitchJob != null) {
                 gate.reset()
+                // Drop the dwell's samples too, so a pose mean that fires right
+                // after the stitch finishes never mixes in frames aimed elsewhere.
+                poseWindow.clear()
                 return@collect
             }
 
@@ -743,6 +758,19 @@ fun PhotoSphereCameraScreen(
                     resetGuidance()
                     scope.launch { buffer.cancelSession() }
                 },
+                // A blurred frame, or one shot while something moved through the
+                // scene: undoing pops it off the buffer and puts its target back
+                // on the reticle so it can simply be shot again.
+                canUndo = bufferedFrames.isNotEmpty() && stitchJob == null,
+                onUndo = {
+                    scope.launch {
+                        val undone = buffer.undoLastFrame() ?: return@launch
+                        activeIndex = undone.index
+                        isHolding = false
+                        alignment = AlignmentState()
+                        gate.reset()
+                    }
+                },
                 // Debug A/B for the lens model; hidden in release builds.
                 distortionEnabled = distortionEnabled,
                 onToggleDistortion = { distortionEnabled = !distortionEnabled },
@@ -778,6 +806,8 @@ private fun CaptureHud(
     canStitch: Boolean,
     onFinish: () -> Unit,
     onRestart: () -> Unit,
+    canUndo: Boolean,
+    onUndo: () -> Unit,
     distortionEnabled: Boolean,
     onToggleDistortion: () -> Unit,
     refinementEnabled: Boolean,
@@ -799,6 +829,17 @@ private fun CaptureHud(
                     )
                 ),
         )
+
+        // The StreetView-style undo: drop the last shot and put its target back
+        // on the reticle. Sits top-left, clear of the centred progress pill.
+        if (canUndo) {
+            UndoButton(
+                onUndo = onUndo,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(start = 20.dp, top = 22.dp),
+            )
+        }
 
         Column(
             modifier = Modifier
@@ -960,6 +1001,32 @@ private fun CaptureProgressPill(
                     modifier = Modifier.padding(top = 6.dp),
                 )
             }
+        }
+    }
+}
+
+/**
+ * The StreetView-style "undo that shot" control: a small glass button that
+ * drops the most recently captured frame and puts its target back on the
+ * reticle. Only appears once there is something to undo.
+ */
+@Composable
+private fun UndoButton(
+    onUndo: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        modifier = modifier,
+        shape = CircleShape,
+        color = Color.Black.copy(alpha = 0.5f),
+        shadowElevation = 8.dp,
+    ) {
+        IconButton(onClick = onUndo) {
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.Undo,
+                contentDescription = stringResource(R.string.capture_undo),
+                tint = Color.White,
+            )
         }
     }
 }

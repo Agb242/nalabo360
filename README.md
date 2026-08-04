@@ -320,6 +320,16 @@ tilting the phone turns the markers with the scene; it is deliberately excluded
 from the *distance* measure, since turning the phone in its own plane does not
 change where it is aimed.
 
+**The overlay, Photo Sphere style.** [`TargetOverlay`](app/src/main/java/com/n30dyn4m1c/photosphere/camera/TargetOverlay.kt)
+draws the reticle the way Google Camera's Photo Sphere and Street View do: a
+large ring fixed at the centre of the viewfinder, sized to the display rather
+than a fine crosshair, that warms from white toward green as the aim closes on
+the active target and fills a dwell arc around its rim while the aim is held
+inside it. Targets are circles rather than footprints: a hollow one is "still to
+cover", a filled green one is "done", and the live target pulses with a dashed
+guide line back to the reticle — collapsing to a chevron on the border when it
+is off-screen, so the user always knows which way to turn.
+
 **The trigger.** [`AlignmentGate`](app/src/main/java/com/n30dyn4m1c/photosphere/camera/AlignmentGate.kt)
 fires once the aim has been within **2°** of the active target continuously for
 **300 ms**. The dwell is what keeps a frame from being taken mid-swing: at a
@@ -345,7 +355,10 @@ the only thing a tap ever moves is focus.
 **Frames** are written full-resolution to the session's cache directory with the
 capture attitude stamped into EXIF `UserComment`, giving the stitcher a starting
 guess at where each frame belongs. Stale sessions are cleared when a new run
-starts.
+starts. A frame that came out blurred, or one shot while something moved through
+the scene, is dropped with the **undo** button in the top-left corner (the
+Street View camera's control): the last frame is deleted and its target becomes
+the active one again, so it can simply be re-shot.
 
 **Device tuning.** [`SphereDeviceProfile`](app/src/main/java/com/n30dyn4m1c/photosphere/camera/SphereDeviceProfile.kt)
 is where a specific phone is tuned, decided once per device. On a Samsung
@@ -372,7 +385,7 @@ back camera, so the tuning is specific without being fragile.
 camera CameraX actually bound, using its camera2 id and the resolution of the
 stream it settled on, rather than from a guess at what *would* bind. That
 matters on a phone with three rear lenses: the plan's spacing, the overlay's
-rectangles and the angle each stitched frame is taken to cover are all scaled by
+markers and the angle each stitched frame is taken to cover are all scaled by
 this one number, and describing the ultrawide while streaming the main lens
 spaces every target roughly twice too far apart — frames that do not overlap at
 all, and a run that fails at the end with nothing to show for it. Three things

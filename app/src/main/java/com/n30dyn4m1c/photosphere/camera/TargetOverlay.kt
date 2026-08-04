@@ -114,7 +114,6 @@ fun TargetOverlay(
             // is a few hundred markers and this runs at display rate.
             camera = SphereProjection.cameraFrame(currentOrientation),
             focalPx = focalPx,
-            fieldOfView = fieldOfView,
             colors = colors,
             focus = focus.value,
             pulse = pulse.value,
@@ -245,19 +244,17 @@ private fun DrawScope.drawFocusCorners(
 /**
  * Draws every marker: the ones already shot, the ones still to come, and the live one.
  *
- * Each marker is a rectangle the size of one frame's capture footprint, not a
- * dot: a filled one means "this area is already covered", an outlined one is
- * "this is the next space to cover". Because the rectangles show the full
- * sensor field of view they can reach past the edge of the preview — the
- * preview is a crop of the capture, and the overlap between neighbouring
- * rectangles is exactly the overlap between neighbouring shots.
+ * Following the Photo Sphere / Street View convention, each marker is a circle
+ * at the screen position the camera will see it — a filled one means "this
+ * direction is already covered", an outlined one is "this is the next space to
+ * cover", and the live target pulses so it reads as the thing to aim the
+ * reticle at.
  */
 private fun DrawScope.drawTargets(
     targets: List<SphereTarget>,
     activeIndex: Int,
     camera: CameraFrame,
     focalPx: Float,
-    fieldOfView: FieldOfView,
     colors: TargetOverlayColors,
     focus: Float,
     pulse: Float,
@@ -265,7 +262,6 @@ private fun DrawScope.drawTargets(
     if (targets.isEmpty()) return
 
     val margin = EDGE_MARGIN.toPx()
-    val strokeWidth = 1.5.dp.toPx()
 
     targets.forEachIndexed { index, target ->
         if (index == activeIndex) return@forEachIndexed
@@ -275,15 +271,11 @@ private fun DrawScope.drawTargets(
         if (!position.isInside(size, margin)) return@forEachIndexed
 
         val isShot = index < activeIndex
-        drawFrameRect(
-            target = target,
-            camera = camera,
-            focalPx = focalPx,
-            fieldOfView = fieldOfView,
-            focus = 1f,
+        drawTargetDot(
+            position = position,
             color = if (isShot) colors.completed else colors.pending,
-            fillAlpha = if (isShot) 0.14f else 0f,
-            strokeWidth = strokeWidth,
+            filled = isShot,
+            radius = (if (isShot) COMPLETED_DOT_RADIUS_DP else PENDING_DOT_RADIUS_DP).toPx(),
         )
     }
 
@@ -293,17 +285,35 @@ private fun DrawScope.drawTargets(
         camera = camera,
         colors = colors,
         focalPx = focalPx,
-        fieldOfView = fieldOfView,
         focus = focus,
         pulse = pulse,
     )
 }
 
+/** A single covered or pending marker: filled for done, outlined for to-go. */
+private fun DrawScope.drawTargetDot(
+    position: Offset,
+    color: Color,
+    filled: Boolean,
+    radius: Float,
+) {
+    if (filled) {
+        drawCircle(color = color, radius = radius, center = position)
+    } else {
+        drawCircle(
+            color = color,
+            radius = radius,
+            center = position,
+            style = Stroke(width = PENDING_DOT_STROKE_DP.toPx()),
+        )
+    }
+}
+
 /**
  * Draws the target the user is being sent to.
  *
- * On screen it is a pulsing rectangle the size of the frame that shot will
- * capture, with a guide line back to the reticle; off screen — behind the
+ * On screen it is a pulsing ring with a solid core — the thing the reticle has
+ * to cover — plus a guide line back to the reticle; off screen — behind the
  * camera, or past the edge of the preview — it collapses to a chevron on the
  * border pointing the way to turn. Without that fallback the first frame of a
  * new target would simply leave the user with an empty viewfinder and no idea
@@ -314,7 +324,6 @@ private fun DrawScope.drawActiveTarget(
     camera: CameraFrame,
     colors: TargetOverlayColors,
     focalPx: Float,
-    fieldOfView: FieldOfView,
     focus: Float,
     pulse: Float,
 ) {
@@ -335,8 +344,10 @@ private fun DrawScope.drawActiveTarget(
 
     // A dashed line from the reticle to the marker: at a glance it reads as
     // "move this way", and it disappears once the two are on top of each other.
+    // The cutoff tracks the reticle's size, so the line never draws inside the
+    // ring while the target is already (nearly) centred.
     val separation = (position - center).getDistance()
-    if (separation > 32.dp.toPx()) {
+    if (separation > min(size.width, size.height) * RETICLE_RADIUS_FRACTION + 24.dp.toPx()) {
         drawLine(
             color = colors.guide.copy(alpha = colors.guide.alpha * focus),
             start = center,
@@ -348,107 +359,42 @@ private fun DrawScope.drawActiveTarget(
         )
     }
 
-    // Two passes: a soft glowing fill that breathes with the pulse, then the
-    // crisp border that carries the colour.
-    drawFrameRect(
-        target = target,
-        camera = camera,
-        focalPx = focalPx,
-        fieldOfView = fieldOfView,
-        focus = focus,
-        color = colors.active.copy(alpha = (1f - pulse) * 0.25f * focus),
-        fillAlpha = 0.10f,
-        strokeWidth = strokeWidth,
-    )
-    drawFrameRect(
-        target = target,
-        camera = camera,
-        focalPx = focalPx,
-        fieldOfView = fieldOfView,
-        focus = focus,
-        color = colors.active.copy(alpha = focus),
-        fillAlpha = 0f,
-        strokeWidth = strokeWidth,
+    // A ring that breathes with the pulse, so the live target reads as alive
+    // rather than as another static marker.
+    val ringRadius = (ACTIVE_RING_BASE_DP + ACTIVE_RING_BREATH_DP * pulse).toPx()
+    drawCircle(
+        color = colors.active.copy(alpha = (1f - pulse) * 0.6f * focus),
+        radius = ringRadius,
+        center = position,
+        style = Stroke(width = strokeWidth),
     )
     drawCircle(
         color = colors.active.copy(alpha = focus),
-        radius = 3.dp.toPx(),
+        radius = ACTIVE_CORE_RADIUS_DP.toPx(),
         center = position,
     )
 }
 
 /**
- * Draws the rectangle of sky one frame shot at [target] will cover.
+ * The fixed capture reticle, sized like a Photo Sphere reticle: a large ring
+ * that the aim has to hold inside, with the dwell arc filling it while the aim
+ * is held steady.
  *
- * The corners are the four directions a camera aimed at [target] sees at the
- * edges of its field of view; projecting them to the screen gives the capture
- * footprint. Drawn only when all four project in front of the camera — close to
- * the edge of the preview some fall behind it, and a clipped quadrilateral
- * would mislead more than a missing marker.
- */
-private fun DrawScope.drawFrameRect(
-    target: SphereTarget,
-    camera: CameraFrame,
-    focalPx: Float,
-    fieldOfView: FieldOfView,
-    focus: Float,
-    color: Color,
-    fillAlpha: Float,
-    strokeWidth: Float,
-) {
-    val projected = frameCorners(target, fieldOfView).mapNotNull { corner ->
-        camera.project(corner).screenOffset(center, focalPx)
-    }
-    if (projected.size < 4) return
-
-    // Grow in from the centre on a hand-over rather than appearing in place.
-    val scaled = projected.map { point ->
-        if (focus >= 1f) point else center + (point - center) * focus
-    }
-
-    val path = Path().apply {
-        moveTo(scaled[0].x, scaled[0].y)
-        lineTo(scaled[1].x, scaled[1].y)
-        lineTo(scaled[3].x, scaled[3].y)
-        lineTo(scaled[2].x, scaled[2].y)
-        close()
-    }
-    if (fillAlpha > 0f) drawPath(path, color = color.copy(alpha = fillAlpha))
-    drawPath(path, color = color, style = Stroke(width = strokeWidth))
-}
-
-/**
- * The four directions that bound a frame shot at [target]: its field of view
- * swung out by half the horizontal angle to either side and half the vertical
- * angle above and below. An approximation near the poles, exact enough for a
- * guide the capture threshold is measured against in degrees.
- */
-private fun frameCorners(target: SphereTarget, fieldOfView: FieldOfView): List<SphereTarget> {
-    val halfWidth = fieldOfView.horizontalDegrees / 2f
-    val halfHeight = fieldOfView.verticalDegrees / 2f
-    val elevation = target.elevationDegrees
-    return listOf(
-        SphereTarget.atElevation(target.yawDegrees - halfWidth, elevation + halfHeight),
-        SphereTarget.atElevation(target.yawDegrees + halfWidth, elevation + halfHeight),
-        SphereTarget.atElevation(target.yawDegrees - halfWidth, elevation - halfHeight),
-        SphereTarget.atElevation(target.yawDegrees + halfWidth, elevation - halfHeight),
-    )
-}
-
-/**
- * The fixed crosshair, plus the dwell arc that fills while the aim is held.
- *
- * The reticle warms from white toward green as the target closes, which gives
- * the user a continuous read on "am I getting closer" instead of a binary that
- * only resolves at the threshold.
+ * The ring warms from white toward green as the target closes, which gives the
+ * user a continuous read on "am I getting closer" instead of a binary that only
+ * resolves at the threshold — and once it closes, holding still is what spins
+ * the arc around and fires the shutter.
  */
 private fun DrawScope.drawReticle(
     alignment: AlignmentState,
     colors: TargetOverlayColors,
 ) {
-    val radius = 26.dp.toPx()
-    val strokeWidth = 2.dp.toPx()
-    val tickLength = 8.dp.toPx()
+    // Sized to the viewport rather than fixed so the reticle reads as a large
+    // thing to aim rather than a fine crosshair to finesse, and stays
+    // proportional on any display.
+    val radius = min(size.width, size.height) * RETICLE_RADIUS_FRACTION
+    val strokeWidth = 3.dp.toPx()
+    val tickLength = 10.dp.toPx()
 
     // Fully warmed at the threshold, cold from ~4x the threshold outward.
     val closeness = if (!alignment.hasDistance) {
@@ -459,33 +405,43 @@ private fun DrawScope.drawReticle(
     }
     val color = lerp(colors.reticle, colors.reticleAligned, closeness)
 
+    // A soft outer halo keeps the ring readable over a bright scene and swells
+    // as the aim closes, so "getting closer" is visible even before the warm-up.
+    drawCircle(
+        color = colors.reticleAligned.copy(alpha = 0.10f + 0.18f * closeness),
+        radius = radius + 8.dp.toPx(),
+        center = center,
+        style = Stroke(width = 1.5.dp.toPx()),
+    )
+
     drawCircle(color = color, radius = radius, center = center, style = Stroke(width = strokeWidth))
-    drawCircle(color = color, radius = 2.dp.toPx(), center = center)
+    drawCircle(color = color, radius = 2.5.dp.toPx(), center = center)
 
     // Four ticks reaching outward, so the centre stays readable over busy scenes.
     listOf(0f, 90f, 180f, 270f).forEach { angle ->
         rotate(degrees = angle, pivot = center) {
             drawLine(
                 color = color,
-                start = Offset(center.x, center.y - radius - tickLength),
-                end = Offset(center.x, center.y - radius - 2.dp.toPx()),
+                start = Offset(center.x, center.y - radius - 2.dp.toPx()),
+                end = Offset(center.x, center.y - radius - 2.dp.toPx() - tickLength),
                 strokeWidth = strokeWidth,
                 cap = StrokeCap.Round,
             )
         }
     }
 
+    // The dwell arc: while the aim holds inside the threshold, it fills the
+    // ring's rim, and the shutter fires the moment it completes. Drawn on top
+    // of the ring so the fill and the target are the same circle.
     if (alignment.dwellProgress > 0f) {
-        val arcRadius = radius + 7.dp.toPx()
-        val arcStroke = 3.dp.toPx()
         drawArc(
             color = colors.reticleAligned,
             startAngle = -90f,
             sweepAngle = 360f * alignment.dwellProgress,
             useCenter = false,
-            topLeft = Offset(center.x - arcRadius, center.y - arcRadius),
-            size = Size(arcRadius * 2f, arcRadius * 2f),
-            style = Stroke(width = arcStroke, cap = StrokeCap.Round),
+            topLeft = Offset(center.x - radius, center.y - radius),
+            size = Size(radius * 2f, radius * 2f),
+            style = Stroke(width = strokeWidth * 1.5f, cap = StrokeCap.Round),
         )
     }
 }
@@ -547,6 +503,27 @@ private fun Offset.isInside(size: Size, margin: Float): Boolean =
     x >= margin && x <= size.width - margin && y >= margin && y <= size.height - margin
 
 private val EDGE_MARGIN = 28.dp
+
+/** How far the reticle ring's radius reaches out from the centre of the preview. */
+private const val RETICLE_RADIUS_FRACTION = 0.16f
+
+/** Radius of a covered marker's filled dot. */
+private val COMPLETED_DOT_RADIUS_DP = 5.dp
+
+/** Radius of a to-go marker's outlined dot. */
+private val PENDING_DOT_RADIUS_DP = 7.dp
+
+/** Stroke of a to-go marker's outline. */
+private val PENDING_DOT_STROKE_DP = 1.5.dp
+
+/** Resting radius of the active target's pulsing ring. */
+private val ACTIVE_RING_BASE_DP = 16.dp
+
+/** How far the active target's ring breathes each pulse. */
+private val ACTIVE_RING_BREATH_DP = 6.dp
+
+/** Radius of the solid core the reticle has to cover on the active target. */
+private val ACTIVE_CORE_RADIUS_DP = 5.dp
 
 @Preview(showBackground = true, backgroundColor = 0xFF1B1B1B, widthDp = 360, heightDp = 640)
 @Composable
