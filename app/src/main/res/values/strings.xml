@@ -13,6 +13,8 @@
     <string name="capture_failed">Capture failed: %1$s</string>
 
     <!-- Guided capture HUD. -->
+    <string name="capture_scope_sphere">Sphere</string>
+    <string name="capture_scope_ring">Horizon ring</string>
     <string name="capture_progress_frames">frames</string>
     <string name="capture_rings">%1$d of %2$d bands</string>
     <string name="capture_lock_focusing">Focusing…</string>

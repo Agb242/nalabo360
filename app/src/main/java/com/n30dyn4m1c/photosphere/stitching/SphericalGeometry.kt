@@ -308,28 +308,61 @@ internal fun featherWeight(
 /**
  * The equirectangular canvas: longitude across, latitude down.
  *
- * The canvas is always 2:1, spanning 360° of longitude and 180° of latitude,
- * with pixel centres sampled at the half-pixel. Longitude runs -180°..180° left
- * to right and matches the yaw convention used everywhere else, so a frame shot
- * facing north lands in the middle of the canvas.
+ * The canvas is always drawn with square pixels — a row maps to the same number
+ * of degrees as a column — so its shape follows the extent of sphere it covers.
+ * A full sphere spans 360° of longitude and 180° of latitude, which is the 2:1
+ * canvas everything else assumes by default. A ring capture spans the same 360°
+ * of longitude but only the band of latitude the frames cover, and a hemisphere
+ * would span 180° about its own centre. The four helpers here all take that
+ * window ([longitudeSpanDegrees]/[centerLongitudeDegrees] and
+ * [latitudeSpanDegrees]/[centerLatitudeDegrees]) with the full-sphere values as
+ * defaults, and the renderer, the footprints and the stitcher thread the same
+ * four numbers through.
+ *
+ * Longitude runs `center - span/2`..`center + span/2` left to right and matches
+ * the yaw convention used everywhere else, so a frame shot facing north lands
+ * in the middle of a full-sphere canvas. Pixel centres are sampled at the
+ * half-pixel.
  */
 object Equirectangular {
 
     /** Longitude sampled at the centre of column [col]. */
-    fun longitudeDegrees(col: Int, width: Int): Double =
-        (col + 0.5) / width * 360.0 - 180.0
+    fun longitudeDegrees(
+        col: Int,
+        width: Int,
+        longitudeSpanDegrees: Float = 360f,
+        centerLongitudeDegrees: Float = 0f,
+    ): Double = centerLongitudeDegrees +
+        (col + 0.5) / width * longitudeSpanDegrees - longitudeSpanDegrees / 2
 
     /** Latitude sampled at the centre of row [row]. */
-    fun latitudeDegrees(row: Int, height: Int): Double =
-        90.0 - (row + 0.5) / height * 180.0
+    fun latitudeDegrees(
+        row: Int,
+        height: Int,
+        latitudeSpanDegrees: Float = 180f,
+        centerLatitudeDegrees: Float = 0f,
+    ): Double = centerLatitudeDegrees + latitudeSpanDegrees / 2 -
+        (row + 0.5) / height * latitudeSpanDegrees
 
     /** Column a longitude falls in. May sit outside `0..width-1` before wrapping. */
-    fun columnFor(longitudeDegrees: Double, width: Int): Double =
-        (longitudeDegrees + 180.0) / 360.0 * width - 0.5
+    fun columnFor(
+        longitudeDegrees: Double,
+        width: Int,
+        longitudeSpanDegrees: Float = 360f,
+        centerLongitudeDegrees: Float = 0f,
+    ): Double =
+        (longitudeDegrees - centerLongitudeDegrees + longitudeSpanDegrees / 2) /
+            longitudeSpanDegrees * width - 0.5
 
     /** Row a latitude falls in, clamped to the canvas. */
-    fun rowFor(latitudeDegrees: Double, height: Int): Double =
-        (90.0 - latitudeDegrees) / 180.0 * height - 0.5
+    fun rowFor(
+        latitudeDegrees: Double,
+        height: Int,
+        latitudeSpanDegrees: Float = 180f,
+        centerLatitudeDegrees: Float = 0f,
+    ): Double =
+        (centerLatitudeDegrees + latitudeSpanDegrees / 2 - latitudeDegrees) /
+            latitudeSpanDegrees * height - 0.5
 
     /** Unit world direction at a longitude/latitude, in the X east, Y north, Z up frame. */
     fun direction(longitudeDegrees: Double, latitudeDegrees: Double): DoubleArray {
@@ -393,7 +426,9 @@ object FrameFootprint {
      * Bounds of what [basis]/[intrinsics] can paint on a [canvasWidth] canvas.
      *
      * [marginPx] pads the result, covering the difference between the sampled
-     * border and the true one between samples.
+     * border and the true one between samples. The four span/centre numbers
+     * describe the region of the sphere the canvas holds (see
+     * [Equirectangular]); they default to the full sphere.
      */
     fun compute(
         basis: CameraBasis,
@@ -402,6 +437,10 @@ object FrameFootprint {
         canvasHeight: Int,
         marginPx: Int = 2,
         pivotRatio: Double = 0.0,
+        longitudeSpanDegrees: Float = 360f,
+        centerLongitudeDegrees: Float = 0f,
+        latitudeSpanDegrees: Float = 180f,
+        centerLatitudeDegrees: Float = 0f,
     ): CanvasFootprint {
         val centreLongitude = Equirectangular.longitudeOf(basis.forwardX, basis.forwardY)
 
@@ -446,8 +485,16 @@ object FrameFootprint {
         if (coversNorthPole) maxLatitude = 90.0
         if (coversSouthPole) minLatitude = -90.0
 
-        val startRow = floorToInt(Equirectangular.rowFor(maxLatitude, canvasHeight)) - marginPx
-        val endRow = ceilToInt(Equirectangular.rowFor(minLatitude, canvasHeight)) + marginPx
+        val startRow = floorToInt(
+            Equirectangular.rowFor(
+                maxLatitude, canvasHeight, latitudeSpanDegrees, centerLatitudeDegrees,
+            )
+        ) - marginPx
+        val endRow = ceilToInt(
+            Equirectangular.rowFor(
+                minLatitude, canvasHeight, latitudeSpanDegrees, centerLatitudeDegrees,
+            )
+        ) + marginPx
         val clampedStartRow = startRow.coerceIn(0, canvasHeight)
         val clampedEndRow = endRow.coerceIn(0, canvasHeight)
 
@@ -460,9 +507,16 @@ object FrameFootprint {
             )
         }
 
-        val startColumn =
-            floorToInt(Equirectangular.columnFor(minLongitude, canvasWidth)) - marginPx
-        val endColumn = ceilToInt(Equirectangular.columnFor(maxLongitude, canvasWidth)) + marginPx
+        val startColumn = floorToInt(
+            Equirectangular.columnFor(
+                minLongitude, canvasWidth, longitudeSpanDegrees, centerLongitudeDegrees,
+            )
+        ) - marginPx
+        val endColumn = ceilToInt(
+            Equirectangular.columnFor(
+                maxLongitude, canvasWidth, longitudeSpanDegrees, centerLongitudeDegrees,
+            )
+        ) + marginPx
         val columnSpan = min(endColumn - startColumn, canvasWidth)
 
         return CanvasFootprint(

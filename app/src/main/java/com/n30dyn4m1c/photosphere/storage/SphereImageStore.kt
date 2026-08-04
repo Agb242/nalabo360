@@ -10,6 +10,7 @@ import android.util.Log
 import androidx.camera.core.ImageCapture
 import androidx.core.content.FileProvider
 import androidx.exifinterface.media.ExifInterface
+import com.n30dyn4m1c.photosphere.metadata.GPanoMetadata
 import com.n30dyn4m1c.photosphere.metadata.GPanoXmpInjector
 import java.io.File
 import java.io.FileOutputStream
@@ -248,6 +249,11 @@ object SphereImageStore {
      * downstream — preview, gallery export, share sheet — works from that one
      * file.
      *
+     * [gpano] is the metadata a viewer reads to treat the file as a pano. It
+     * defaults to a full sphere ([GPanoMetadata.forFullPano]); a ring capture
+     * passes a region ([GPanoMetadata.forSphereRegion]) so the band the frames
+     * covered is what viewers render.
+     *
      * The order of the two metadata passes matters. EXIF goes on first, because
      * [ExifInterface.saveAttributes] rewrites the whole JPEG and makes no promise
      * about carrying unrecognised segments across; GPano goes on second, so the
@@ -264,6 +270,7 @@ object SphereImageStore {
         context: Context,
         bitmap: Bitmap,
         quality: Int = SPHERE_JPEG_QUALITY,
+        gpano: GPanoMetadata = GPanoMetadata.forFullPano(bitmap.width, bitmap.height),
     ): StitchedSphere {
         val directory = spheresDirectory(context)
         directory.listFiles()?.forEach { stale ->
@@ -285,7 +292,7 @@ object SphereImageStore {
         }
 
         stampSphereDescription(file)
-        GPanoXmpInjector.inject(file, bitmap.width, bitmap.height)
+        GPanoXmpInjector.inject(file, gpano)
             .onFailure { error ->
                 // Recoverable: the file is a valid 2:1 JPEG either way, it will
                 // simply open flat instead of as a sphere.

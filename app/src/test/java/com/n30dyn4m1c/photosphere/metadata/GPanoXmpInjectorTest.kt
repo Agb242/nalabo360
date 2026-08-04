@@ -145,6 +145,45 @@ class GPanoXmpInjectorTest {
     }
 
     @Test
+    fun `a full sphere through the region factory is the full pano`() {
+        assertEquals(
+            GPanoMetadata.forFullPano(4096, 2048),
+            GPanoMetadata.forSphereRegion(
+                imageWidth = 4096,
+                imageHeight = 2048,
+                longitudeSpanDegrees = 360f,
+                centerLongitudeDegrees = 0f,
+                latitudeSpanDegrees = 180f,
+                centerLatitudeDegrees = 0f,
+            ),
+        )
+    }
+
+    @Test
+    fun `a ring capture is a horizontal slice of the full sphere`() {
+        // A 4096 × 819 image holding a 360° × 72° band about the horizon. The
+        // full sphere it slices out of is 4096 wide and 2.5× as tall, and the
+        // band sits centred on the horizon.
+        val metadata = GPanoMetadata.forSphereRegion(
+            imageWidth = 4096,
+            imageHeight = 819,
+            longitudeSpanDegrees = 360f,
+            centerLongitudeDegrees = 0f,
+            latitudeSpanDegrees = 72f,
+            centerLatitudeDegrees = 0f,
+        )
+
+        assertEquals(4096, metadata.fullPanoWidthPixels)
+        assertEquals(2048, metadata.fullPanoHeightPixels)
+        assertEquals(4096, metadata.croppedAreaImageWidthPixels)
+        assertEquals(819, metadata.croppedAreaImageHeightPixels)
+        assertEquals(0, metadata.croppedAreaLeftPixels)
+        // The band spans ±36°; the top of the canvas is 36° above the horizon,
+        // which is (90 − 36)/180 of the way down the full sphere.
+        assertEquals((54.0 / 180.0 * 2048).toInt(), metadata.croppedAreaTopPixels)
+    }
+
+    @Test
     fun `a cropped area outside the sphere is rejected`() {
         assertThrows(IllegalArgumentException::class.java) {
             GPanoMetadata(

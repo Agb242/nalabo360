@@ -138,31 +138,31 @@ data class SphereTargetPlan(
          *
          * This stitcher refines the measured poses by matching features between
          * overlapping frames, so the overlap has to be wide enough for a
-         * feature-based stitcher to find its bearings. Half the field of view
-         * is a deliberately generous target: it is what absorbs the two things
-         * that silently eat the shared band down to nothing — a field of view
-         * estimate that runs high, and a degree or two of sensor drift between
-         * frames. The cost is more frames per ring; the alternative is a run
-         * that only reveals itself as un-stitchable at the end.
+         * feature-based stitcher to find its bearings. A third is that: 35% of
+         * each frame is well inside the neighbours' view on both axes, which is
+         * what the pose refinement needs. The field of view it is measured
+         * against is read off the *bound* camera's own intrinsic calibration
+         * ([CameraOptics]) rather than a guess, so the estimate no longer needs
+         * the half-the-frame margin it once did — what remains absorbs a degree
+         * or two of sensor drift. It costs about a third fewer frames per ring
+         * than the old 50% target, at the price of the drift tolerance the
+         * calibration already buys back.
          */
-        const val DEFAULT_TARGET_OVERLAP_FRACTION: Float = 0.5f
+        const val DEFAULT_TARGET_OVERLAP_FRACTION: Float = 0.35f
 
         /**
          * Fraction of the reported field of view the plan actually spends.
          *
          * The overlap above is only as good as the field of view it is measured
-         * against, and that number is an estimate read off optics the camera
-         * describes with varying honesty — a logical multi-camera that lists
-         * every lens's focal length, an intrinsic calibration quoted against a
-         * different sensor crop than the one being streamed. Overestimating it
-         * spaces the targets too far apart, and the overlap the stitcher needs
+         * against, and that number comes from [CameraOptics], which reconciles
+         * two independent estimates and re-reads them from the lens CameraX
+         * actually bound. It is still an estimate, so the plan spends a little
+         * less of it than the lens claims — but only a tenth now, instead of the
+         * fifth that made sense when the field of view was a guess. Overestimating
+         * it spaces the targets too far apart, and the overlap the stitcher needs
          * is the first thing to be eaten.
-         *
-         * So the plan is laid out as though the lens were a fifth narrower than
-         * it claims. The cost is a few more frames; the alternative is a run
-         * that only reveals itself as un-stitchable at the end.
          */
-        const val FIELD_OF_VIEW_SAFETY_FACTOR: Float = 0.8f
+        const val FIELD_OF_VIEW_SAFETY_FACTOR: Float = 0.9f
 
         /**
          * Lays out a sphere whose first target sits at [startYawDegrees].

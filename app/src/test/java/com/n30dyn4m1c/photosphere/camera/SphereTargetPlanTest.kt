@@ -103,7 +103,7 @@ class SphereTargetPlanTest {
         assertTrue("wide lens took more frames", wide.size < narrow.size)
 
         // The equator spacing tracks the lens, so the overlap each frame has
-        // with its neighbour stays near the 50% target rather than piling up.
+        // with its neighbour stays near the 35% target rather than piling up.
         val overlap = { plan: SphereTargetPlan, horizontalFov: Float ->
             val equator = plan.targets.filter { it.elevationDegrees == 0f }
             val separation = angularDistance(equator[0], equator[1])
@@ -112,8 +112,8 @@ class SphereTargetPlanTest {
         // The band is wide because the plan deliberately spends less of the
         // lens than the lens claims (FIELD_OF_VIEW_SAFETY_FACTOR), so the real
         // overlap sits above the nominal target rather than below it.
-        assertTrue("narrow-lens overlap off target", overlap(narrow, 52f) in 0.45f..0.75f)
-        assertTrue("wide-lens overlap off target", overlap(wide, 76f) in 0.45f..0.75f)
+        assertTrue("narrow-lens overlap off target", overlap(narrow, 52f) in 0.30f..0.55f)
+        assertTrue("wide-lens overlap off target", overlap(wide, 76f) in 0.30f..0.55f)
     }
 
     @Test
@@ -199,6 +199,22 @@ class SphereTargetPlanTest {
         ring.targets.forEach {
             assertEquals("ring target off the horizon", 0f, it.elevationDegrees, TOLERANCE)
         }
+    }
+
+    @Test
+    fun `a ring capture closes the full circle`() {
+        // The "regular pano that goes all the way around": the horizon band,
+        // but the sweep must cover the whole 360° — not just a 180° slice of it.
+        val ring = SphereTargetPlan.createForFieldOfView(
+            startYawDegrees = 40f,
+            fieldOfView = FieldOfView(horizontalDegrees = 52f, verticalDegrees = 66f),
+            scope = SphereCaptureScope.Ring,
+        )
+
+        val gaps = ring.targets.indices.sumOf { index ->
+            angularDistance(ring.targets[index], ring.targets[(index + 1) % ring.size]).toDouble()
+        }
+        assertEquals("the ring does not close on itself", 360.0, gaps, 1.0)
     }
 
     @Test

@@ -82,6 +82,11 @@ internal object EquirectangularRenderer {
      * user turned about, as a fraction of the scene's distance. Zero treats the
      * lens as the pivot, which is what a tripod gives and what a hand-held
      * capture never quite does.
+     *
+     * The four span/centre numbers describe the region of the sphere the canvas
+     * holds (see [Equirectangular]); they default to a full 360°×180° sphere.
+     * The canvas is expected to be sized to them — `canvasHeight` should be
+     * `canvasWidth * latitudeSpan / longitudeSpan` for square pixels.
      */
     fun render(
         frames: List<PreparedFrame>,
@@ -89,6 +94,10 @@ internal object EquirectangularRenderer {
         canvasHeight: Int,
         gains: FloatArray? = null,
         pivotRatio: Double = 0.0,
+        longitudeSpanDegrees: Float = 360f,
+        centerLongitudeDegrees: Float = 0f,
+        latitudeSpanDegrees: Float = 180f,
+        centerLatitudeDegrees: Float = 0f,
         onBandComplete: (completed: Int, total: Int) -> Unit = { _, _ -> },
         checkCancelled: () -> Unit = {},
     ): Rendered {
@@ -114,6 +123,10 @@ internal object EquirectangularRenderer {
                     bandHeight = bandHeight,
                     gains = gains,
                     pivotRatio = pivotRatio,
+                    longitudeSpanDegrees = longitudeSpanDegrees,
+                    centerLongitudeDegrees = centerLongitudeDegrees,
+                    latitudeSpanDegrees = latitudeSpanDegrees,
+                    centerLatitudeDegrees = centerLatitudeDegrees,
                     scratch = scratch,
                 )
                 onBandComplete(band + 1, bandCount)
@@ -137,6 +150,10 @@ internal object EquirectangularRenderer {
         bandHeight: Int,
         gains: FloatArray?,
         pivotRatio: Double,
+        longitudeSpanDegrees: Float,
+        centerLongitudeDegrees: Float,
+        latitudeSpanDegrees: Float,
+        centerLatitudeDegrees: Float,
         scratch: SegmentScratch,
     ): Long {
         val colorSum = Mat.zeros(bandHeight, canvasWidth, CvType.CV_32FC3)
@@ -151,7 +168,11 @@ internal object EquirectangularRenderer {
                 val rowEnd = min(bandTop + bandHeight, footprint.startRow + footprint.rowSpan)
                 if (rowEnd <= rowStart) continue
 
-                forEachColumnRun(footprint, canvasWidth) { canvasColumn, columnSpan ->
+                forEachColumnRun(
+                    footprint,
+                    canvasWidth,
+                    longitudeSpanDegrees,
+                ) { canvasColumn, columnSpan ->
                     accumulateSegment(
                         frame = frame,
                         colorSum = colorSum,
@@ -165,6 +186,10 @@ internal object EquirectangularRenderer {
                         columnCount = columnSpan,
                         gain = gains?.getOrNull(frameIndex) ?: 1f,
                         pivotRatio = pivotRatio,
+                        longitudeSpanDegrees = longitudeSpanDegrees,
+                        centerLongitudeDegrees = centerLongitudeDegrees,
+                        latitudeSpanDegrees = latitudeSpanDegrees,
+                        centerLatitudeDegrees = centerLatitudeDegrees,
                         scratch = scratch,
                     )
                 }
@@ -200,6 +225,10 @@ internal object EquirectangularRenderer {
         columnCount: Int,
         gain: Float,
         pivotRatio: Double,
+        longitudeSpanDegrees: Float,
+        centerLongitudeDegrees: Float,
+        latitudeSpanDegrees: Float,
+        centerLatitudeDegrees: Float,
         scratch: SegmentScratch,
     ) {
         if (rowCount <= 0 || columnCount <= 0) return
@@ -216,13 +245,19 @@ internal object EquirectangularRenderer {
 
         // Longitude is periodic, so a column that was unwrapped past the seam
         // gives the same direction as the column it wraps onto — the canvas
-        // column can be used directly here.
+        // column can be used directly here. On a region canvas this holds too:
+        // only [forEachColumnRun] decides whether the seam wraps or clips.
         val forwardHorizontal = scratch.forwardHorizontal
         val rightHorizontal = scratch.rightHorizontal
         val upHorizontal = scratch.upHorizontal
         for (offset in 0 until columnCount) {
             val longitude = Math.toRadians(
-                Equirectangular.longitudeDegrees(columnStart + offset, canvasWidth)
+                Equirectangular.longitudeDegrees(
+                    columnStart + offset,
+                    canvasWidth,
+                    longitudeSpanDegrees,
+                    centerLongitudeDegrees,
+                )
             )
             val sinLongitude = sin(longitude)
             val cosLongitude = cos(longitude)
@@ -238,7 +273,12 @@ internal object EquirectangularRenderer {
 
         for (rowOffset in 0 until rowCount) {
             val latitude = Math.toRadians(
-                Equirectangular.latitudeDegrees(rowStart + rowOffset, canvasHeight)
+                Equirectangular.latitudeDegrees(
+                    rowStart + rowOffset,
+                    canvasHeight,
+                    latitudeSpanDegrees,
+                    centerLatitudeDegrees,
+                )
             )
             val cosLatitude = cos(latitude)
             val sinLatitude = sin(latitude)
@@ -393,21 +433,32 @@ internal object EquirectangularRenderer {
      *
      * A footprint that crosses the ±180° seam is one unbroken band of longitude
      * but two blocks of canvas, so [block] is called twice for it and once for
-     * everything else. The span never exceeds the canvas width, so there are
-     * never more than two runs.
+     * everything else. That seam is only periodic when the canvas holds a full
+     * turn of longitude: a region canvas (fewer than 360° of it) has an edge
+     * that is a real cut, so a footprint running past either edge is *clipped*
+     * there instead — the far side is outside the captured region and stays
+     * black. The span never exceeds the canvas width, so a full-turn canvas
+     * never produces more than two runs.
      */
     private inline fun forEachColumnRun(
         footprint: CanvasFootprint,
         canvasWidth: Int,
+        longitudeSpanDegrees: Float,
         block: (canvasColumn: Int, columnSpan: Int) -> Unit,
     ) {
         val span = min(footprint.columnSpan, canvasWidth)
         if (span <= 0) return
-        val first = wrapColumn(footprint.startColumn, canvasWidth)
-        val firstSpan = min(span, canvasWidth - first)
-        block(first, firstSpan)
-        val remainder = span - firstSpan
-        if (remainder > 0) block(0, remainder)
+        if (longitudeSpanDegrees >= 360f) {
+            val first = wrapColumn(footprint.startColumn, canvasWidth)
+            val firstSpan = min(span, canvasWidth - first)
+            block(first, firstSpan)
+            val remainder = span - firstSpan
+            if (remainder > 0) block(0, remainder)
+        } else {
+            val first = max(footprint.startColumn, 0)
+            val last = min(footprint.startColumn + span, canvasWidth)
+            if (last > first) block(first, last - first)
+        }
     }
 
     /**

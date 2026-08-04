@@ -65,6 +65,16 @@ class PhotoSphereStitcherTest {
     }
 
     @Test
+    fun `the canvas height follows the latitude span`() {
+        // A full sphere: 180° of latitude across 360° of longitude is a 2:1 canvas.
+        assertEquals(2048, PhotoSphereStitcher.canvasHeightFor(4096, 360f, 180f))
+        // A ring spanning 72° of latitude is one fifth as tall as it is wide.
+        assertEquals(819, PhotoSphereStitcher.canvasHeightFor(4096, 360f, 72f))
+        // A hemisphere (180° × 180°) would be square.
+        assertEquals(4096, PhotoSphereStitcher.canvasHeightFor(4096, 180f, 180f))
+    }
+
+    @Test
     fun `subsampling brings the long edge under the limit`() {
         // 4:3 sensor at 12MP, decoded for a 1024px working size.
         assertEquals(4, sampleSizeFor(width = 4000, height = 3000, maxDimension = 1024))

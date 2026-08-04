@@ -253,7 +253,13 @@ object PhotoSphereStitcher {
     }
 
     /**
-     * Stitches [frames] into a 2:1 equirectangular [Bitmap].
+     * Stitches [frames] into an equirectangular [Bitmap].
+     *
+     * By default the canvas is the full sphere — 2:1, 360° of longitude by 180°
+     * of latitude. A ring capture covers the same 360° of longitude but only a
+     * band of latitude, so [latitudeSpanDegrees] (with [centerLatitudeDegrees])
+     * narrows the canvas to that band and the output comes out as a wide strip
+     * instead of a 2:1 image with black wedges at the poles.
      *
      * The two field of view angles describe the *decoded, upright* frame — the
      * same screen-frame angles `rememberSphereOptics` reports — and set how
@@ -306,6 +312,10 @@ object PhotoSphereStitcher {
         portraitRotationDegrees: Int = 90,
         useRefinement: Boolean = false,
         debugColorFrames: Boolean = false,
+        longitudeSpanDegrees: Float = 360f,
+        centerLongitudeDegrees: Float = 0f,
+        latitudeSpanDegrees: Float = 180f,
+        centerLatitudeDegrees: Float = 0f,
         onProgress: (StitchProgress) -> Unit = {},
     ): Result<Bitmap> = withContext(Dispatchers.Default) {
         val decoded = ArrayList<DecodedFrame>(frames.size)
@@ -421,6 +431,7 @@ object PhotoSphereStitcher {
                         frameWidthPx = image.cols(),
                         horizontalFovDegrees = horizontalFov,
                         maxOutputWidth = maxOutputWidth,
+                        longitudeSpanDegrees = longitudeSpanDegrees,
                     )
                 }
                 decoded += DecodedFrame(
@@ -430,10 +441,12 @@ object PhotoSphereStitcher {
                 )
             }
             onProgress(StitchProgress(StitchStage.Reading, frames.size, frames.size))
+            val canvasHeight = canvasHeightFor(canvasWidth, longitudeSpanDegrees, latitudeSpanDegrees)
             Log.i(
                 TAG,
                 "Stitch geometry: corrected FOV ${horizontalFov}°x${verticalFov}°, " +
-                    "canvas ${canvasWidth}x${canvasWidth / 2}",
+                    "canvas ${canvasWidth}x$canvasHeight " +
+                    "($longitudeSpanDegrees° x $latitudeSpanDegrees°)",
             )
 
             ensureActive()
@@ -490,8 +503,12 @@ object PhotoSphereStitcher {
                         basis = basis,
                         intrinsics = intrinsics,
                         canvasWidth = canvasWidth,
-                        canvasHeight = canvasWidth / 2,
+                        canvasHeight = canvasHeight,
                         pivotRatio = pivot.ratio,
+                        longitudeSpanDegrees = longitudeSpanDegrees,
+                        centerLongitudeDegrees = centerLongitudeDegrees,
+                        latitudeSpanDegrees = latitudeSpanDegrees,
+                        centerLatitudeDegrees = centerLatitudeDegrees,
                     ),
                 )
             }
@@ -504,9 +521,13 @@ object PhotoSphereStitcher {
             val rendered = EquirectangularRenderer.render(
                 frames = prepared,
                 canvasWidth = canvasWidth,
-                canvasHeight = canvasWidth / 2,
+                canvasHeight = canvasHeight,
                 gains = refinement.gains,
                 pivotRatio = pivot.ratio,
+                longitudeSpanDegrees = longitudeSpanDegrees,
+                centerLongitudeDegrees = centerLongitudeDegrees,
+                latitudeSpanDegrees = latitudeSpanDegrees,
+                centerLatitudeDegrees = centerLatitudeDegrees,
                 onBandComplete = { completed, total ->
                     onProgress(StitchProgress(StitchStage.Stitching, completed, total))
                 },
@@ -563,17 +584,36 @@ object PhotoSphereStitcher {
      * Canvas width that matches the detail in the frames.
      *
      * Rendering wider than this only interpolates: the frames hold
-     * `frameWidthPx / fov` pixels per degree and the sphere is 360° around. The
-     * width is forced even so the 2:1 canvas has an integer height.
+     * `frameWidthPx / fov` pixels per degree and the sphere is
+     * [longitudeSpanDegrees] around (360° for a full sphere or a ring capture).
+     * The width is forced even so a full-sphere canvas has an integer height.
      */
     internal fun canvasWidthFor(
         frameWidthPx: Int,
         horizontalFovDegrees: Float,
         maxOutputWidth: Int,
+        longitudeSpanDegrees: Float = 360f,
     ): Int {
-        val ideal = (360.0 * frameWidthPx / horizontalFovDegrees).roundToInt()
+        val ideal = (longitudeSpanDegrees * frameWidthPx / horizontalFovDegrees).roundToInt()
         val width = minOf(ideal, maxOutputWidth).coerceAtLeast(MIN_OUTPUT_WIDTH)
         return width - (width % 2)
+    }
+
+    /**
+     * Canvas height that keeps the pixels square for a canvas spanning
+     * [longitudeSpanDegrees] of longitude and [latitudeSpanDegrees] of latitude.
+     *
+     * A full sphere is half as tall as wide (180° of latitude across 360° of
+     * longitude); a ring capture is only as tall as its band is wide in angular
+     * terms, so a 360° × 72° ring comes out at exactly one fifth of the width.
+     */
+    internal fun canvasHeightFor(
+        canvasWidth: Int,
+        longitudeSpanDegrees: Float,
+        latitudeSpanDegrees: Float,
+    ): Int {
+        val height = (canvasWidth * latitudeSpanDegrees / longitudeSpanDegrees).roundToInt()
+        return height.coerceAtLeast(1)
     }
 
     /**

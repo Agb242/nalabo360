@@ -149,6 +149,25 @@ class SphericalGeometryTest {
     }
 
     @Test
+    fun `a ring canvas maps its latitude band across the full height`() {
+        // A ring capture renders 360° of longitude but only the band of latitude
+        // the level frames cover — say 72° about the horizon. Rows then span
+        // ±36° rather than the poles, and the row lookup inverts the sampling.
+        val height = 720
+        val span = 72f
+        val centre = 0f
+
+        assertEquals(36.0, Equirectangular.latitudeDegrees(0, height, span, centre), 0.1)
+        assertEquals(-36.0, Equirectangular.latitudeDegrees(height - 1, height, span, centre), 0.1)
+        assertEquals(0.0, Equirectangular.latitudeDegrees(height / 2, height, span, centre), 0.1)
+
+        listOf(0, 1, 359, height - 1).forEach { row ->
+            val latitude = Equirectangular.latitudeDegrees(row, height, span, centre)
+            assertEquals(row.toDouble(), Equirectangular.rowFor(latitude, height, span, centre), 1e-9)
+        }
+    }
+
+    @Test
     fun `the centre of a frame lands where the camera was pointing`() {
         val pose = CameraPose(yawDegrees = 40f, pitchDegrees = -20f, rollDegrees = 0f)
         val basis = CameraBasis.of(pose)

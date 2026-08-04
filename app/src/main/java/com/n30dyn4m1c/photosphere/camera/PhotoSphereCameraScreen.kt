@@ -91,6 +91,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.n30dyn4m1c.photosphere.BuildConfig
 import com.n30dyn4m1c.photosphere.R
+import com.n30dyn4m1c.photosphere.metadata.GPanoMetadata
 import com.n30dyn4m1c.photosphere.sensor.OrientationAccuracy
 import com.n30dyn4m1c.photosphere.sensor.OrientationData
 import com.n30dyn4m1c.photosphere.sensor.currentDisplayRotation
@@ -122,6 +123,19 @@ import kotlin.coroutines.resumeWithException
 import kotlin.math.roundToInt
 
 private const val TAG = "PhotoSphereCamera"
+
+/**
+ * How much taller a ring capture's canvas band is than the lens's vertical
+ * field of view.
+ *
+ * A ring is shot with the camera level, so each frame reaches about half a
+ * field of view above and below the horizon when held upright. Rolling the
+ * phone in its own plane can reach further — the corners sweep out the frame's
+ * half-diagonal, which for a tall portrait frame is noticeably wider than the
+ * vertical half-angle — so the band is widened to comfortably cover that plus a
+ * degree or two of aim error from the gate and any pose-refinement movement.
+ */
+private const val RING_LATITUDE_SPAN_FACTOR = 1.3f
 
 /**
  * Guided capture: viewfinder, alignment overlay, and an automatic shutter.
@@ -187,10 +201,21 @@ fun PhotoSphereCameraScreen(
     val optics = rememberSphereOptics(boundCameraId, streamAspectRatio)
     val fieldOfView = optics.fieldOfView
 
-    // The plan always walks the whole sphere — rings from the horizon out to
-    // both poles. There is no scope for the user to choose: coverage is
-    // inferred from the frames as they land, and the run can be stitched at
-    // any point, so the jobs left to the user are just aim, hold, and shoot.
+    // How much of the sphere the plan walks: the whole sphere (rings out to
+    // both poles) or just the horizon ring — a regular pano that goes all the
+    // way around. Locked once the first frame lands: re-planning under buffered
+    // frames would renumber the targets they were shot against.
+    var captureScope by rememberSaveable { mutableStateOf(SphereCaptureScope.Sphere) }
+
+    // How tall the output canvas is, as a span of latitude. A sphere covers the
+    // poles (180°); a ring covers only the band of latitude its level frames
+    // reach, widened past the vertical field of view so tilt or refinement can
+    // not push content off the canvas.
+    val latitudeSpanDegrees = when (captureScope) {
+        SphereCaptureScope.Sphere -> 180f
+        SphereCaptureScope.Ring -> fieldOfView.verticalDegrees * RING_LATITUDE_SPAN_FACTOR
+    }
+
     val currentFieldOfView by rememberUpdatedState(fieldOfView)
 
     // Where focus is aimed and whether the lens has locked there. Set by the
@@ -459,6 +484,7 @@ fun PhotoSphereCameraScreen(
                 ?: SphereTargetPlan.createForFieldOfView(
                     startYawDegrees = orientation.yawDegrees,
                     fieldOfView = currentFieldOfView,
+                    scope = captureScope,
                 ).also { plan = it }
 
             val target = currentPlan.getOrNull(activeIndex)
@@ -542,7 +568,9 @@ fun PhotoSphereCameraScreen(
     // start again. Only while the session is still empty: re-planning around
     // captured frames would renumber the targets they were shot against. The
     // optics settle as the camera binds, before the first frame in practice.
-    LaunchedEffect(fieldOfView) {
+    // The scope changes do the same thing — and the toggle is disabled once a
+    // frame exists, so this is really just the initial layout.
+    LaunchedEffect(fieldOfView, captureScope) {
         if (buffer.frames.value.isEmpty()) {
             plan = null
             activeIndex = 0
@@ -606,11 +634,29 @@ fun PhotoSphereCameraScreen(
                     portraitRotationDegrees = optics.portraitRotationDegrees,
                     useRefinement = refinementEnabled,
                     debugColorFrames = colorFrames,
+                    // The canvas region: a full 360° of longitude either way,
+                    // and either the whole 180° of latitude (sphere) or the band
+                    // a level ring actually covers.
+                    longitudeSpanDegrees = 360f,
+                    centerLongitudeDegrees = 0f,
+                    latitudeSpanDegrees = latitudeSpanDegrees,
+                    centerLatitudeDegrees = 0f,
                 ) { stitchProgress.value = it }
                     .onSuccess { sphere ->
                         val stitched = try {
                             withContext(Dispatchers.IO) {
-                                SphereImageStore.writeStitchedSphere(context, sphere)
+                                SphereImageStore.writeStitchedSphere(
+                                    context = context,
+                                    bitmap = sphere,
+                                    gpano = GPanoMetadata.forSphereRegion(
+                                        imageWidth = sphere.width,
+                                        imageHeight = sphere.height,
+                                        longitudeSpanDegrees = 360f,
+                                        centerLongitudeDegrees = 0f,
+                                        latitudeSpanDegrees = latitudeSpanDegrees,
+                                        centerLatitudeDegrees = 0f,
+                                    ),
+                                )
                                     .copy(
                                         diagnostics = stitchDiagnostics(
                                             frames,
@@ -748,6 +794,11 @@ fun PhotoSphereCameraScreen(
                 ),
                 lockBadge = lockBadge,
                 isComplete = isComplete,
+                captureScope = captureScope,
+                // A mode change would renumber the targets already-shot frames
+                // were aimed at, so the choice is made before the first frame.
+                canChangeScope = bufferedFrames.isEmpty() && stitchJob == null,
+                onScopeChange = { captureScope = it },
                 // Three overlapping frames are already a panorama. Whether one
                 // is worth keeping is the user's call, made on the result
                 // screen; the button's job is not to stand between them and it.
@@ -808,6 +859,9 @@ private fun CaptureHud(
     onRestart: () -> Unit,
     canUndo: Boolean,
     onUndo: () -> Unit,
+    captureScope: SphereCaptureScope,
+    canChangeScope: Boolean,
+    onScopeChange: (SphereCaptureScope) -> Unit,
     distortionEnabled: Boolean,
     onToggleDistortion: () -> Unit,
     refinementEnabled: Boolean,
@@ -849,6 +903,11 @@ private fun CaptureHud(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
+            CaptureScopeSelector(
+                scope = captureScope,
+                enabled = canChangeScope,
+                onScopeChange = onScopeChange,
+            )
             CaptureProgressPill(
                 capturedCount = capturedCount,
                 totalTargets = totalTargets,
@@ -930,6 +989,50 @@ private fun CaptureHud(
                         color = Color.White.copy(alpha = 0.9f),
                     )
                 }
+            }
+        }
+    }
+}
+
+/**
+ * The choice of how much of the sphere the run walks: the whole thing, or just
+ * the horizon ring. A small two-way pill above the progress readout; dimmed and
+ * inert once a frame has been captured, because re-planning under buffered
+ * frames would renumber the targets they were shot against.
+ */
+@Composable
+private fun CaptureScopeSelector(
+    scope: SphereCaptureScope,
+    enabled: Boolean,
+    onScopeChange: (SphereCaptureScope) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier,
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        SphereCaptureScope.entries.forEach { option ->
+            val selected = option == scope
+            Surface(
+                shape = RoundedCornerShape(50),
+                color = if (selected) CaptureAccent else Color.Black.copy(alpha = 0.4f),
+                onClick = { if (enabled) onScopeChange(option) },
+            ) {
+                Text(
+                    text = when (option) {
+                        SphereCaptureScope.Sphere -> stringResource(R.string.capture_scope_sphere)
+                        SphereCaptureScope.Ring -> stringResource(R.string.capture_scope_ring)
+                    },
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                    color = if (selected) {
+                        Color.Black
+                    } else {
+                        Color.White.copy(alpha = if (enabled) 0.9f else 0.45f)
+                    },
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+                )
             }
         }
     }

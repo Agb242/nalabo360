@@ -9,6 +9,7 @@ import java.io.FileOutputStream
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
+import kotlin.math.roundToInt
 
 /**
  * The Google Photo Sphere (GPano) properties that mark a JPEG as a 360° photo.
@@ -16,12 +17,11 @@ import java.io.OutputStream
  * Every length is in pixels of the image the metadata is attached to. The
  * `CroppedArea*` group describes which part of the full sphere the pixels
  * actually cover: for a full equirectangular frame it is the whole image, which
- * is what [forFullPano] produces. A partial sphere would keep the full-pano
- * dimensions at the size the *complete* sphere would have been and place the
- * covered rectangle inside it — this pipeline never emits that, because the
- * renderer draws straight into a full 2:1 canvas and leaves the parts the
- * capture never reached black, so the cropped area and the image are the same
- * thing.
+ * is what [forFullPano] produces. A partial capture keeps the full-pano
+ * dimensions at the size the *complete* sphere would have been and places the
+ * covered rectangle inside it — [forSphereRegion] expresses a ring capture that
+ * way, so a viewer renders the band the frames actually cover and limits
+ * panning to it instead of showing the black wedges where nothing was shot.
  */
 data class GPanoMetadata(
     /** Width the complete sphere occupies. */
@@ -78,6 +78,45 @@ data class GPanoMetadata(
             croppedAreaLeftPixels = 0,
             croppedAreaTopPixels = 0,
         )
+
+        /**
+         * Metadata for an image that holds a *region* of the sphere, mapped
+         * equirectangularly.
+         *
+         * The image covers [longitudeSpanDegrees] of longitude centred on
+         * [centerLongitudeDegrees] and [latitudeSpanDegrees] of latitude centred
+         * on [centerLatitudeDegrees]. A viewer maps the full-pano dimensions to
+         * the whole 360°×180° sphere and renders the cropped area inside it, so
+         * a ring capture — one band all the way around the horizon — is expressed
+         * as the matching horizontal slice of a full sphere, and panning is
+         * limited to the band the frames actually covered. A full sphere passed
+         * through here resolves to the same values as [forFullPano].
+         */
+        fun forSphereRegion(
+            imageWidth: Int,
+            imageHeight: Int,
+            longitudeSpanDegrees: Float,
+            centerLongitudeDegrees: Float,
+            latitudeSpanDegrees: Float,
+            centerLatitudeDegrees: Float,
+        ): GPanoMetadata {
+            require(longitudeSpanDegrees in 1f..360f) { "longitude span: $longitudeSpanDegrees" }
+            require(latitudeSpanDegrees in 1f..180f) { "latitude span: $latitudeSpanDegrees" }
+            val fullWidth = (imageWidth * 360f / longitudeSpanDegrees).roundToInt()
+            val fullHeight = (imageHeight * 180f / latitudeSpanDegrees).roundToInt()
+            val left = ((centerLongitudeDegrees + 180f) / 360f * fullWidth).roundToInt() -
+                imageWidth / 2
+            val top = ((90f - centerLatitudeDegrees - latitudeSpanDegrees / 2f) / 180f * fullHeight)
+                .roundToInt()
+            return GPanoMetadata(
+                fullPanoWidthPixels = fullWidth,
+                fullPanoHeightPixels = fullHeight,
+                croppedAreaImageWidthPixels = imageWidth,
+                croppedAreaImageHeightPixels = imageHeight,
+                croppedAreaLeftPixels = left.coerceAtLeast(0),
+                croppedAreaTopPixels = top.coerceAtLeast(0),
+            )
+        }
     }
 }
 
