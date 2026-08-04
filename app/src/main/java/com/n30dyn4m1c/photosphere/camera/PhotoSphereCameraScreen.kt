@@ -360,6 +360,26 @@ fun PhotoSphereCameraScreen(
         }
     }
 
+    // CameraX releases the camera when the *lifecycle* is destroyed, which for a
+    // single-activity app is not when this screen goes away. Leaving the session
+    // bound behind the result screen keeps the sensor streaming and the preview
+    // converging — measurable battery and heat for a viewfinder nobody is
+    // looking at — so the bind is undone explicitly on the way out.
+    DisposableEffect(lifecycleOwner) {
+        onDispose {
+            imageCapture = null
+            boundCamera = null
+            // Only if the provider has already resolved: this runs on the main
+            // thread, and a future that is still pending has nothing bound to
+            // release anyway.
+            val future = ProcessCameraProvider.getInstance(context)
+            if (future.isDone) {
+                runCatching { future.get().unbindAll() }
+                    .onFailure { Log.w(TAG, "Could not release the camera", it) }
+            }
+        }
+    }
+
     // Old sessions are dead weight once a new one starts; clearing them keeps the
     // cache from growing by a sphere's worth of full-resolution JPEGs per run.
     LaunchedEffect(sessionId) {
@@ -421,12 +441,13 @@ fun PhotoSphereCameraScreen(
 
             val distance = SphereProjection.angularDistanceDegrees(orientation, target)
 
-            // Careful shooting: no frame is taken while the fused sensor doubts
-            // itself. An unreliable magnetometer drifts the reported aim by
-            // degrees even when the phone is still, and a frame placed on the
-            // sphere by that aim would land off its target no matter how long
-            // it is held.
-            if (!orientation.accuracy.isUsable) {
+            // Careful shooting: no frame is taken while the fused sensor says
+            // its own output is not to be believed. An unreliable magnetometer
+            // drifts the reported aim by degrees even when the phone is still,
+            // and a frame placed on the sphere by that aim would land off its
+            // target no matter how long it is held. Merely *uncalibrated* is
+            // fine — see OrientationAccuracy.allowsCapture.
+            if (!orientation.accuracy.allowsCapture) {
                 gate.reset()
                 alignment = AlignmentState(distanceDegrees = distance)
                 isHolding = false
@@ -459,6 +480,12 @@ fun PhotoSphereCameraScreen(
                 burstPerTarget = deviceProfile.burstPerTarget,
             )
             alignment = alignment.copy(isCapturing = false)
+
+            // The dwell that produced this frame is spent either way. Left in
+            // place, its samples would still be sitting in the window when the
+            // next target's dwell completes, and that frame's pose would be an
+            // average of two different aims.
+            poseWindow.clear()
 
             result
                 .onSuccess {
@@ -1171,7 +1198,12 @@ private fun captureHint(
     !isCameraReady -> stringResource(R.string.capture_starting)
     isComplete -> stringResource(R.string.capture_sphere_complete)
     !hasPlan -> stringResource(R.string.capture_waiting_for_orientation)
-    accuracy == OrientationAccuracy.Unreliable -> stringResource(R.string.capture_low_accuracy)
+    // The shutter is held only at Unreliable, so that case says so plainly.
+    // Low still shoots, but the compass is worth calibrating, so it is offered
+    // as advice rather than as an explanation for a stalled capture.
+    !accuracy.allowsCapture -> stringResource(R.string.capture_accuracy_blocked)
+    !accuracy.isUsable && accuracy != OrientationAccuracy.Unknown ->
+        stringResource(R.string.capture_low_accuracy)
     isHolding -> stringResource(R.string.capture_hint_hold)
     // A closed ring is a complete band of sphere and a perfectly good result.
     // Saying so is what turns "keep going or lose it" into a real choice.

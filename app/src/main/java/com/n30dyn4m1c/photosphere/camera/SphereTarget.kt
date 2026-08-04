@@ -6,6 +6,7 @@ import kotlin.math.cos
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
+import kotlin.math.sin
 
 /**
  * One frame the sphere needs, expressed as a direction to aim the camera at.
@@ -23,6 +24,27 @@ data class SphereTarget(
 ) {
     /** Height above the horizon, positive up — the sign most people expect. */
     val elevationDegrees: Float get() = -pitchDegrees
+
+    /**
+     * The unit world direction (X east, Y north, Z up) to aim at.
+     *
+     * Computed once per target rather than per projection: a plan holds a few
+     * hundred of these and the overlay projects every one of them on every
+     * frame, so the four trigonometric calls behind them are worth spending at
+     * construction time instead of at display rate.
+     */
+    val directionX: Double
+    val directionY: Double
+    val directionZ: Double
+
+    init {
+        val yaw = Math.toRadians(yawDegrees.toDouble())
+        val elevation = Math.toRadians(elevationDegrees.toDouble())
+        val cosElevation = cos(elevation)
+        directionX = sin(yaw) * cosElevation
+        directionY = cos(yaw) * cosElevation
+        directionZ = sin(elevation)
+    }
 
     companion object {
         /** Builds a target from an elevation (positive up) rather than a pitch. */

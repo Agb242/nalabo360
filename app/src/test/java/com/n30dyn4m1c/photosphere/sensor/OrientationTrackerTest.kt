@@ -104,6 +104,20 @@ class OrientationTrackerTest {
     }
 
     @Test
+    fun `capture is only refused when the sensor calls itself unreliable`() {
+        // The capture plan is anchored on the bearing the run started at, so an
+        // uncalibrated compass shifts every target together and costs the sphere
+        // nothing. Gating capture on `isUsable` instead strands the user
+        // indoors: the reticle tracks perfectly and the shutter never fires,
+        // with nothing on screen to explain it.
+        assertTrue(OrientationAccuracy.High.allowsCapture)
+        assertTrue(OrientationAccuracy.Medium.allowsCapture)
+        assertTrue(OrientationAccuracy.Low.allowsCapture)
+        assertTrue(OrientationAccuracy.Unknown.allowsCapture)
+        assertFalse(OrientationAccuracy.Unreliable.allowsCapture)
+    }
+
+    @Test
     fun `the default sample has no fix`() {
         assertFalse(OrientationData().hasFix)
         assertTrue(OrientationData(timestampNanos = 1L).hasFix)

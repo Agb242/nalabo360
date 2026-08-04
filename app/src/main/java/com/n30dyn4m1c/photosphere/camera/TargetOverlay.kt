@@ -109,7 +109,10 @@ fun TargetOverlay(
         drawTargets(
             targets = targets,
             activeIndex = activeIndex,
-            orientation = currentOrientation,
+            // The camera's axes are the same for every marker, so they are built
+            // once here rather than rebuilt inside each projection: a full plan
+            // is a few hundred markers and this runs at display rate.
+            camera = SphereProjection.cameraFrame(currentOrientation),
             focalPx = focalPx,
             fieldOfView = fieldOfView,
             colors = colors,
@@ -252,7 +255,7 @@ private fun DrawScope.drawFocusCorners(
 private fun DrawScope.drawTargets(
     targets: List<SphereTarget>,
     activeIndex: Int,
-    orientation: OrientationData,
+    camera: CameraFrame,
     focalPx: Float,
     fieldOfView: FieldOfView,
     colors: TargetOverlayColors,
@@ -262,43 +265,32 @@ private fun DrawScope.drawTargets(
     if (targets.isEmpty()) return
 
     val margin = EDGE_MARGIN.toPx()
+    val strokeWidth = 1.5.dp.toPx()
 
     targets.forEachIndexed { index, target ->
         if (index == activeIndex) return@forEachIndexed
 
-        val view = SphereProjection.project(orientation, target)
-        val position = view.screenOffset(center, focalPx) ?: return@forEachIndexed
+        val position = camera.project(target).screenOffset(center, focalPx)
+            ?: return@forEachIndexed
         if (!position.isInside(size, margin)) return@forEachIndexed
 
-        if (index < activeIndex) {
-            drawFrameRect(
-                target = target,
-                orientation = orientation,
-                focalPx = focalPx,
-                fieldOfView = fieldOfView,
-                focus = 1f,
-                color = colors.completed,
-                fillAlpha = 0.14f,
-                strokeWidth = 1.5.dp.toPx(),
-            )
-        } else {
-            drawFrameRect(
-                target = target,
-                orientation = orientation,
-                focalPx = focalPx,
-                fieldOfView = fieldOfView,
-                focus = 1f,
-                color = colors.pending,
-                fillAlpha = 0f,
-                strokeWidth = 1.5.dp.toPx(),
-            )
-        }
+        val isShot = index < activeIndex
+        drawFrameRect(
+            target = target,
+            camera = camera,
+            focalPx = focalPx,
+            fieldOfView = fieldOfView,
+            focus = 1f,
+            color = if (isShot) colors.completed else colors.pending,
+            fillAlpha = if (isShot) 0.14f else 0f,
+            strokeWidth = strokeWidth,
+        )
     }
 
     val activeTarget = targets.getOrNull(activeIndex) ?: return
     drawActiveTarget(
         target = activeTarget,
-        orientation = orientation,
+        camera = camera,
         colors = colors,
         focalPx = focalPx,
         fieldOfView = fieldOfView,
@@ -319,7 +311,7 @@ private fun DrawScope.drawTargets(
  */
 private fun DrawScope.drawActiveTarget(
     target: SphereTarget,
-    orientation: OrientationData,
+    camera: CameraFrame,
     colors: TargetOverlayColors,
     focalPx: Float,
     fieldOfView: FieldOfView,
@@ -327,7 +319,7 @@ private fun DrawScope.drawActiveTarget(
     pulse: Float,
 ) {
     val margin = EDGE_MARGIN.toPx()
-    val view = SphereProjection.project(orientation, target)
+    val view = camera.project(target)
     val position = view.screenOffset(center, focalPx)
 
     if (position == null || !position.isInside(size, margin)) {
@@ -360,7 +352,7 @@ private fun DrawScope.drawActiveTarget(
     // crisp border that carries the colour.
     drawFrameRect(
         target = target,
-        orientation = orientation,
+        camera = camera,
         focalPx = focalPx,
         fieldOfView = fieldOfView,
         focus = focus,
@@ -370,7 +362,7 @@ private fun DrawScope.drawActiveTarget(
     )
     drawFrameRect(
         target = target,
-        orientation = orientation,
+        camera = camera,
         focalPx = focalPx,
         fieldOfView = fieldOfView,
         focus = focus,
@@ -396,7 +388,7 @@ private fun DrawScope.drawActiveTarget(
  */
 private fun DrawScope.drawFrameRect(
     target: SphereTarget,
-    orientation: OrientationData,
+    camera: CameraFrame,
     focalPx: Float,
     fieldOfView: FieldOfView,
     focus: Float,
@@ -405,7 +397,7 @@ private fun DrawScope.drawFrameRect(
     strokeWidth: Float,
 ) {
     val projected = frameCorners(target, fieldOfView).mapNotNull { corner ->
-        SphereProjection.project(orientation, corner).screenOffset(center, focalPx)
+        camera.project(corner).screenOffset(center, focalPx)
     }
     if (projected.size < 4) return
 

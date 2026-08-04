@@ -73,8 +73,28 @@ enum class OrientationAccuracy {
     High,
     ;
 
-    /** Medium is the lowest accuracy worth feeding into capture guidance. */
+    /**
+     * Medium is the lowest accuracy whose *absolute* bearing is worth trusting
+     * — the reading that would make a sphere's compass heading meaningful.
+     */
     val isUsable: Boolean get() = this == Medium || this == High
+
+    /**
+     * Whether guided capture should fire the shutter at this accuracy.
+     *
+     * Deliberately weaker than [isUsable]. What the capture loop needs is that
+     * the aim be *consistent between frames*, and that comes from the gyroscope
+     * half of the fused sensor: the plan is anchored on whatever bearing the
+     * user was facing when the first fix landed, so a magnetometer that is
+     * merely uncalibrated shifts every target together and costs the sphere
+     * nothing. Only [Unreliable] — the state where the fusion says its own
+     * output is not to be believed — is worth refusing to shoot at.
+     *
+     * Blocking on [isUsable] instead is a dead end the user cannot see their
+     * way out of: indoors, near steel, a phone can sit at [Low] indefinitely
+     * while the reticle tracks the scene perfectly and the shutter never fires.
+     */
+    val allowsCapture: Boolean get() = this != Unreliable
 
     internal companion object {
         fun fromSensorAccuracy(accuracy: Int): OrientationAccuracy = when (accuracy) {
@@ -257,20 +277,32 @@ class OrientationTracker(
     override fun onSensorChanged(event: SensorEvent) {
         if (event.sensor.type != Sensor.TYPE_ROTATION_VECTOR) return
 
+        val raw = event.values
+        // A rotation vector is three elements plus an optional scalar; anything
+        // shorter is not one, and a HAL that hands over a truncated event would
+        // otherwise take the matrix helper into an array bound.
+        if (raw.size < 3) return
+
         // Some vendors append a fifth element (estimated heading accuracy); only
         // the leading quaternion is the rotation itself.
-        val values = if (event.values.size > ROTATION_VECTOR_SIZE) {
-            event.values.copyInto(
+        val values = if (raw.size > ROTATION_VECTOR_SIZE) {
+            raw.copyInto(
                 destination = rotationVectorValues,
                 endIndex = ROTATION_VECTOR_SIZE,
             )
         } else {
-            event.values
+            raw
         }
 
         // Quaternion -> rotation matrix mapping device coordinates to the world
-        // frame (X east, Y north, Z up).
-        SensorManager.getRotationMatrixFromVector(rotationMatrix, values)
+        // frame (X east, Y north, Z up). A malformed sample is worth skipping,
+        // not crashing the sensor thread over.
+        try {
+            SensorManager.getRotationMatrixFromVector(rotationMatrix, values)
+        } catch (e: IllegalArgumentException) {
+            Log.w(TAG, "Rejected a malformed rotation vector", e)
+            return
+        }
 
         val angles = when (reference) {
             OrientationReference.Screen ->
@@ -287,9 +319,33 @@ class OrientationTracker(
             yawDegrees = angles[0],
             pitchDegrees = angles[1],
             rollDegrees = angles[2],
-            accuracy = accuracy,
+            accuracy = accuracyOf(event),
             timestampNanos = event.timestamp,
         )
+    }
+
+    /**
+     * The accuracy to publish with a sample.
+     *
+     * [SensorEvent.accuracy] carries the current status on every event, while
+     * [onAccuracyChanged] only fires on a *change* — and a good many HALs never
+     * fire it at all, including the first time. Reading the event is what stops
+     * a device that simply never calls back from sitting at
+     * [OrientationAccuracy.Unknown] forever, which the capture loop would see as
+     * a sensor that never became trustworthy.
+     *
+     * The callback still wins when it has spoken, because a vendor that bothers
+     * to send it is the better authority on its own fusion. And the event can
+     * only ever *raise* the reading: a HAL that never calls back and leaves the
+     * field at its zero default would otherwise look identical to one declaring
+     * its own output unreliable, and the capture loop would refuse to shoot on a
+     * phone whose sensor is working perfectly well.
+     */
+    private fun accuracyOf(event: SensorEvent): OrientationAccuracy {
+        val reported = accuracy
+        if (reported != OrientationAccuracy.Unknown) return reported
+        val fromEvent = OrientationAccuracy.fromSensorAccuracy(event.accuracy)
+        return if (fromEvent == OrientationAccuracy.Unreliable) reported else fromEvent
     }
 
     /**
@@ -450,8 +506,6 @@ internal fun cameraAnglesDegrees(
     val up0X = -sinYaw * sinElevation
     val up0Y = -cosYaw * sinElevation
     val up0Z = cosElevation
-    val right0X = cosYaw
-    val right0Y = -sinYaw
     val sinRoll = -(rx * up0X + ry * up0Y + rz * up0Z)
     val cosRoll = ux * up0X + uy * up0Y + uz * up0Z
     val roll = Math.toDegrees(atan2(sinRoll, cosRoll)).toFloat()

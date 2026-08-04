@@ -6,11 +6,9 @@ import org.opencv.core.Mat
 import org.opencv.core.Rect
 import org.opencv.core.Scalar
 import org.opencv.imgproc.Imgproc
-import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.max
 import kotlin.math.min
-import kotlin.math.pow
 import kotlin.math.sin
 
 /**
@@ -56,16 +54,6 @@ internal object EquirectangularRenderer {
     private const val BAND_HEIGHT = 128
 
     /**
-     * Exponent the feather weight is raised to.
-     *
-     * A power greater than one makes the closest frame dominate a shared pixel
-     * and confines the cross-fade to a thin band. A linear feather leaves both
-     * frames at comparable weights across a wide overlap, which turns the
-     * residual pose error between neighbouring frames into a broad smear.
-     */
-    private const val BLEND_POWER = 3.0
-
-    /**
      * Added to the weight before dividing, so an uncovered pixel divides 0 by a
      * small number rather than 0 by 0. Small enough not to darken real pixels,
      * whose weights are orders of magnitude larger.
@@ -107,6 +95,10 @@ internal object EquirectangularRenderer {
         val canvas = Mat.zeros(canvasHeight, canvasWidth, CvType.CV_8UC3)
         var coveredPixels = 0L
         val bandCount = (canvasHeight + BAND_HEIGHT - 1) / BAND_HEIGHT
+        // One set of scratch buffers for the whole render. A pole-covering frame
+        // reaches the full canvas width, so a per-segment allocation would churn
+        // tens of megabytes of float array per band across forty frames.
+        val scratch = SegmentScratch()
 
         try {
             for (band in 0 until bandCount) {
@@ -122,6 +114,7 @@ internal object EquirectangularRenderer {
                     bandHeight = bandHeight,
                     gains = gains,
                     pivotRatio = pivotRatio,
+                    scratch = scratch,
                 )
                 onBandComplete(band + 1, bandCount)
             }
@@ -144,6 +137,7 @@ internal object EquirectangularRenderer {
         bandHeight: Int,
         gains: FloatArray?,
         pivotRatio: Double,
+        scratch: SegmentScratch,
     ): Long {
         val colorSum = Mat.zeros(bandHeight, canvasWidth, CvType.CV_32FC3)
         val weightSum = Mat.zeros(bandHeight, canvasWidth, CvType.CV_32FC1)
@@ -171,6 +165,7 @@ internal object EquirectangularRenderer {
                         columnCount = columnSpan,
                         gain = gains?.getOrNull(frameIndex) ?: 1f,
                         pivotRatio = pivotRatio,
+                        scratch = scratch,
                     )
                 }
             }
@@ -205,6 +200,7 @@ internal object EquirectangularRenderer {
         columnCount: Int,
         gain: Float,
         pivotRatio: Double,
+        scratch: SegmentScratch,
     ) {
         if (rowCount <= 0 || columnCount <= 0) return
 
@@ -216,12 +212,14 @@ internal object EquirectangularRenderer {
         val maxRow = intrinsics.heightPx - 1.0
         val radial = intrinsics.radial
 
+        scratch.prepare(rowCount, columnCount)
+
         // Longitude is periodic, so a column that was unwrapped past the seam
         // gives the same direction as the column it wraps onto — the canvas
         // column can be used directly here.
-        val forwardHorizontal = DoubleArray(columnCount)
-        val rightHorizontal = DoubleArray(columnCount)
-        val upHorizontal = DoubleArray(columnCount)
+        val forwardHorizontal = scratch.forwardHorizontal
+        val rightHorizontal = scratch.rightHorizontal
+        val upHorizontal = scratch.upHorizontal
         for (offset in 0 until columnCount) {
             val longitude = Math.toRadians(
                 Equirectangular.longitudeDegrees(columnStart + offset, canvasWidth)
@@ -233,10 +231,9 @@ internal object EquirectangularRenderer {
             upHorizontal[offset] = sinLongitude * basis.upX + cosLongitude * basis.upY
         }
 
-        val pixelCount = rowCount * columnCount
-        val mapX = FloatArray(pixelCount)
-        val mapY = FloatArray(pixelCount)
-        val weights = FloatArray(pixelCount)
+        val mapX = scratch.mapX
+        val mapY = scratch.mapY
+        val weights = scratch.weights
         var anyCovered = false
 
         for (rowOffset in 0 until rowCount) {
@@ -262,6 +259,7 @@ internal object EquirectangularRenderer {
                     // keeps it out of the mean regardless.
                     mapX[index] = -1f
                     mapY[index] = -1f
+                    weights[index] = 0f
                     continue
                 }
 
@@ -290,22 +288,15 @@ internal object EquirectangularRenderer {
                 ) {
                     mapX[index] = -1f
                     mapY[index] = -1f
+                    weights[index] = 0f
                     continue
                 }
 
                 mapX[index] = sourceColumn.toFloat()
                 mapY[index] = sourceRow.toFloat()
-                // Feather: full strength at the optical axis, falling to nothing
-                // at the frame's border, so overlaps cross-fade. Raised to a
-                // power so the frame that sees the direction most head-on wins
-                // the blend instead of a wide linear cross-fade.
-                val acrossFrame = 1.0 - abs(idealColumn - centreX) / centreX
-                val downFrame = 1.0 - abs(idealRow - centreY) / centreY
-                val weight = (acrossFrame * downFrame).pow(BLEND_POWER)
-                if (weight > 0.0) {
-                    weights[index] = weight.toFloat()
-                    anyCovered = true
-                }
+                val weight = featherWeight(idealColumn, idealRow, centreX, centreY)
+                weights[index] = weight.toFloat()
+                if (weight > 0.0) anyCovered = true
             }
         }
 
@@ -318,6 +309,10 @@ internal object EquirectangularRenderer {
         val warpedFloat = Mat()
         val weight3 = Mat()
         try {
+            // The scratch arrays are sized to the largest segment seen so far
+            // and so are usually longer than this one. `Mat.put` clamps the copy
+            // to the matrix's own element count, which is exactly the leading
+            // `rowCount * columnCount` entries these loops just filled.
             mapXMat.put(0, 0, mapX)
             mapYMat.put(0, 0, mapY)
             weightMat.put(0, 0, weights)
@@ -413,5 +408,47 @@ internal object EquirectangularRenderer {
         block(first, firstSpan)
         val remainder = span - firstSpan
         if (remainder > 0) block(0, remainder)
+    }
+
+    /**
+     * Grow-only working buffers for one segment's projection.
+     *
+     * A render walks every frame across every band, and each visit needs three
+     * float arrays the size of the rectangle it is painting plus three the width
+     * of it. Allocating those per visit is tens of megabytes of short-lived
+     * array per band on a wide canvas — enough garbage to stall a stitch on a
+     * mid-range phone. The buffers are only ever grown, so after the first few
+     * segments the render allocates nothing at all.
+     *
+     * Confined to the rendering thread; a render is single-threaded by
+     * construction, and one scratch is created per [render] call.
+     */
+    private class SegmentScratch {
+        var mapX: FloatArray = FloatArray(0)
+            private set
+        var mapY: FloatArray = FloatArray(0)
+            private set
+        var weights: FloatArray = FloatArray(0)
+            private set
+        var forwardHorizontal: DoubleArray = DoubleArray(0)
+            private set
+        var rightHorizontal: DoubleArray = DoubleArray(0)
+            private set
+        var upHorizontal: DoubleArray = DoubleArray(0)
+            private set
+
+        fun prepare(rowCount: Int, columnCount: Int) {
+            val pixels = rowCount * columnCount
+            if (mapX.size < pixels) {
+                mapX = FloatArray(pixels)
+                mapY = FloatArray(pixels)
+                weights = FloatArray(pixels)
+            }
+            if (forwardHorizontal.size < columnCount) {
+                forwardHorizontal = DoubleArray(columnCount)
+                rightHorizontal = DoubleArray(columnCount)
+                upHorizontal = DoubleArray(columnCount)
+            }
+        }
     }
 }
