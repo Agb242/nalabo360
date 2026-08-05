@@ -6,11 +6,17 @@ package com.n30dyn4m1c.photosphere.camera
 import android.annotation.SuppressLint
 import android.content.Context
 import android.os.Build
+import android.hardware.camera2.CameraCaptureSession
+import android.hardware.camera2.CaptureRequest
+import android.hardware.camera2.CaptureResult
+import android.hardware.camera2.TotalCaptureResult
 import android.os.SystemClock
 import android.util.Log
 import android.util.Size
+import androidx.camera.camera2.interop.Camera2CameraControl
 import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.camera2.interop.Camera2Interop
+import androidx.camera.camera2.interop.CaptureRequestOptions
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.FocusMeteringAction
@@ -113,6 +119,7 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -123,6 +130,21 @@ import kotlin.coroutines.resumeWithException
 import kotlin.math.roundToInt
 
 private const val TAG = "PhotoSphereCamera"
+
+/**
+ * How long to wait for the 3A to report a converged exposure before locking
+ * AE/AWB anyway.
+ *
+ * The convergence callback locks the moment the HAL reports
+ * `CONTROL_AE_STATE_CONVERGED`, which is when the exposure has actually
+ * settled on the scene — the right moment on a bright day (a few frames) and
+ * on a dark night (after the exposure ramps up). Some HALs never report
+ * CONVERGED for a scene, so the lock falls back to this timeout: by then the
+ * repeating request has long since settled, and a settled-but-unreported
+ * exposure is still far better than the stream-start default a black viewfinder
+ * would have frozen.
+ */
+private const val THREE_A_LOCK_TIMEOUT_MS = 6_000L
 
 /**
  * How much taller a ring capture's canvas band is than the lens's vertical
@@ -325,11 +347,42 @@ fun PhotoSphereCameraScreen(
             CameraSelector.DEFAULT_BACK_CAMERA
         }
 
-        // Exposure, white balance and focus are locked for the whole session
-        // (see SphereCaptureProfile): a sphere's seams are exposure and colour
-        // seams, so no frame is allowed to re-meter on its own. The locks ride
-        // in the preview's repeating request as well as the stills', so the
-        // viewfinder shows exactly what each frame will record.
+        // Exposure, white balance and focus are held for the whole session (see
+        // SphereCaptureProfile): a sphere's seams are exposure and colour seams,
+        // so no frame is allowed to re-meter on its own. The locks must not sit
+        // in the stream's very first request, though — locking AE from frame one
+        // freezes the exposure at the HAL's stream-start defaults (a short
+        // exposure and low ISO chosen for a bright scene), so a dark scene never
+        // brightens and the night viewfinder stays black. The session starts
+        // with the 3A running, waits for it to converge on the scene, and locks
+        // to the values it settled on (see [lockThreeA]). The stills carry the
+        // same locks so a capture fired mid-convergence cannot walk away from
+        // what the viewfinder is showing.
+        var camera2Control: Camera2CameraControl? = null
+        var threeALocked = false
+        // Locks AE and AWB on the repeating request. Deliberately a lambda
+        // (rather than a local fun) so the session capture callback below can
+        // capture it. Called from the camera thread when the 3A converges, and
+        // from the main thread by the timeout fallback; `addCaptureRequestOptions`
+        // is safe from either. The options are applied to the session's repeating
+        // request — the preview — and to the stills, keeping the viewfinder and
+        // every frame on one exposure and colour temperature.
+        val lockThreeA = {
+            if (!threeALocked) {
+                val control = camera2Control
+                if (control != null) {
+                    threeALocked = true
+                    runCatching {
+                        control.addCaptureRequestOptions(
+                            CaptureRequestOptions.Builder()
+                                .setCaptureRequestOption(CaptureRequest.CONTROL_AE_LOCK, true)
+                                .setCaptureRequestOption(CaptureRequest.CONTROL_AWB_LOCK, true)
+                                .build()
+                        )
+                    }.onFailure { Log.w(TAG, "Could not lock 3A", it) }
+                }
+            }
+        }
         val preview = Preview.Builder()
             // Pinned to the stills' shape. Left to itself CameraX picks a
             // preview close to the display's aspect ratio — 16:9 or taller on a
@@ -344,7 +397,33 @@ fun PhotoSphereCameraScreen(
                     .setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
                     .build()
             )
-            .also { applySphereCaptureOptions(Camera2Interop.Extender(it), profile) }
+            .also { builder ->
+                val extender = Camera2Interop.Extender(builder)
+                applySphereCaptureOptions(extender, profile)
+                // Watch the repeating request for the 3A settling, then lock AE
+                // and AWB to the converged values. The exposure ramps up over the
+                // first moments in low light, so locking when the HAL reports
+                // CONVERGED (or FLASH_REQUIRED, the dark-scene equivalent when
+                // flash is off) pins the session to an exposure that is actually
+                // bright enough — instead of the stream-start default that left
+                // the night viewfinder black. [lockThreeA] is idempotent and
+                // null-guarded, so the first settled frame that arrives after the
+                // camera control is ready wins and the rest are no-ops.
+                extender.setSessionCaptureCallback(
+                    object : CameraCaptureSession.CaptureCallback() {
+                        override fun onCaptureCompleted(
+                            session: CameraCaptureSession,
+                            request: CaptureRequest,
+                            result: TotalCaptureResult,
+                        ) {
+                            val state = result.get(CaptureResult.CONTROL_AE_STATE)
+                            val settled = state == CaptureResult.CONTROL_AE_STATE_CONVERGED ||
+                                state == CaptureResult.CONTROL_AE_STATE_FLASH_REQUIRED
+                            if (settled) lockThreeA()
+                        }
+                    }
+                )
+            }
             .build()
             .apply {
                 setSurfaceProvider(previewView.surfaceProvider)
@@ -393,6 +472,11 @@ fun PhotoSphereCameraScreen(
             }
             imageCapture = capture
             boundCamera = camera
+            // The lock target for the convergence callback: the session's
+            // repeating request can only be touched once the camera is bound.
+            camera2Control = runCatching {
+                Camera2CameraControl.from(camera.cameraControl)
+            }.getOrNull()
             // The lens that answered, not the one that was asked for: a filter
             // that matched nothing, or a device that substitutes a logical
             // camera, both land here and both would otherwise leave the optics
@@ -406,6 +490,14 @@ fun PhotoSphereCameraScreen(
                 ?.let { it.width.toFloat() / it.height }
                 ?: 0f
             Log.i(TAG, "Bound camera $boundCameraId, stills $streamAspectRatio:1")
+            // Some HALs never report CONVERGED for a scene; by the timeout the
+            // repeating request has long since settled, so locking then is still
+            // locking to a real exposure rather than the stream-start default.
+            // The callback wins the race on devices that do report convergence.
+            scope.launch {
+                delay(THREE_A_LOCK_TIMEOUT_MS)
+                lockThreeA()
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Camera binding failed", e)
             snackbarHostState.showSnackbar(
