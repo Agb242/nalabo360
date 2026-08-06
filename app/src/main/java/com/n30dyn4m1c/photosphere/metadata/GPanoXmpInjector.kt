@@ -9,6 +9,8 @@ import java.io.FileOutputStream
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import kotlin.math.roundToInt
 
 /**
@@ -211,10 +213,13 @@ object GPanoXmpInjector {
             }
             if (!temp.renameTo(file)) {
                 // Some filesystems refuse to rename onto an existing name. The
-                // original is fully readable until this point, so the window
-                // where neither file is in place is a single syscall wide.
-                if (!file.delete() || !temp.renameTo(file)) {
-                    throw IOException("Could not move ${temp.name} onto ${file.name}")
+                // original is fully readable until this point; replace it
+                // atomically rather than delete-then-rename, which would open a
+                // window where neither copy exists if the second call failed.
+                try {
+                    Files.move(temp.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING)
+                } catch (e: IOException) {
+                    throw IOException("Could not move ${temp.name} onto ${file.name}", e)
                 }
             }
             file

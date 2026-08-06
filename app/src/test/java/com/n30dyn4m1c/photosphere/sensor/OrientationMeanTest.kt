@@ -9,6 +9,10 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import kotlin.math.abs
 
+private fun DoubleArray.toFloatArrayCompat(): FloatArray = FloatArray(size) { this[it].toFloat() }
+
+private fun FloatArray.toDoubleArrayCompat(): DoubleArray = DoubleArray(size) { this[it].toDouble() }
+
 /**
  * The dwell-window pose averaging that quiets the sensor for the frame it
  * stamps onto the sphere.
@@ -85,18 +89,18 @@ class OrientationMeanTest {
             listOf(
                 OrientationData(
                     yawDegrees = 10f, pitchDegrees = -89f, rollDegrees = 5f,
-                    timestampNanos = 1L, cameraBasis = firstMatrix.toFloatArray(),
+                    timestampNanos = 1L, cameraBasis = firstMatrix.toFloatArrayCompat(),
                 ),
                 OrientationData(
                     yawDegrees = 170f, pitchDegrees = -89f, rollDegrees = -175f,
-                    timestampNanos = 2L, cameraBasis = secondMatrix.toFloatArray(),
+                    timestampNanos = 2L, cameraBasis = secondMatrix.toFloatArrayCompat(),
                 ),
             )
         )
 
         // The mean carries a basis, and it sits between the two samples.
         assertNotNull(mean.cameraBasis)
-        val meanMatrix = CameraBasis.fromRotationMatrix(mean.cameraBasis!!.toDoubleArray())
+        val meanMatrix = CameraBasis.fromRotationMatrix(mean.cameraBasis!!.toDoubleArrayCompat())
             .toRotationMatrix()
         val fromFirst = Math.toDegrees(RotationMath.angle(meanMatrix, firstMatrix))
         val fromSecond = Math.toDegrees(RotationMath.angle(meanMatrix, secondMatrix))
@@ -124,7 +128,7 @@ class OrientationMeanTest {
         // average of the scattered angles.
         val basis = CameraBasis.of(CameraPose(yawDegrees = 0f, pitchDegrees = -90f, rollDegrees = 0f))
             .toRotationMatrix()
-            .toFloatArray()
+            .toFloatArrayCompat()
 
         val mean = meanOrientation(
             listOf(
@@ -139,8 +143,8 @@ class OrientationMeanTest {
             )
         )
 
-        val expected = CameraBasis.fromRotationMatrix(basis.toDoubleArray()).toRotationMatrix()
-        val meanMatrix = CameraBasis.fromRotationMatrix(mean.cameraBasis!!.toDoubleArray())
+        val expected = CameraBasis.fromRotationMatrix(basis.toDoubleArrayCompat()).toRotationMatrix()
+        val meanMatrix = CameraBasis.fromRotationMatrix(mean.cameraBasis!!.toDoubleArrayCompat())
             .toRotationMatrix()
         assertEquals(0.0, RotationMath.angle(meanMatrix, expected), 1e-4)
 

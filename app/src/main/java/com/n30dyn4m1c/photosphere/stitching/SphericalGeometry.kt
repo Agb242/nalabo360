@@ -24,8 +24,8 @@ data class CameraPose(
     val rollDegrees: Float,
     /**
      * The camera's basis as a rotation matrix, when the pose was measured as
-     * one — the `[right, up, forward]` columns in the world frame, in the
-     * [CameraBasis.toRotationMatrix] layout. The sensor layer provides it for
+     * one — in the [CameraBasis.toRotationMatrix] layout (the `[right, −up,
+     * forward]` columns in the world frame). The sensor layer provides it for
      * every captured frame: the dwell is averaged as *rotations*, because the
      * Euler components collapse into each other at the zenith (pitch ±90°),
      * where yaw alone cannot say which way is up in the frame.
@@ -46,7 +46,8 @@ data class CameraPose(
  * and evaluates it against millions of directions — the components are held as
  * flat doubles so the projection loop allocates nothing.
  *
- * The three vectors are orthonormal and right-handed: `right × up = forward`.
+ * The three vectors are orthonormal and left-handed: `up = right × forward`,
+ * so `right × up = −forward`.
  */
 class CameraBasis private constructor(
     val forwardX: Double,
@@ -84,15 +85,22 @@ class CameraBasis private constructor(
     )
 
     /**
-     * This basis as a row-major 3×3 rotation matrix mapping camera axes to the
-     * world frame. The columns are `[right, up, forward]` — `toWorld` is exactly
-     * the matrix times the camera-space vector. Exchanged with pose refinement,
-     * which works in rotation matrices.
+     * This basis as a row-major 3×3 rotation matrix.
+     *
+     * The camera's own (right, up, forward) triple is left-handed — `up` is
+     * built as `right × forward` — so those columns would form a reflection,
+     * and the rotation algebra downstream (quaternion means, pose refinement)
+     * assumes proper rotations: an improper matrix smuggles a 90° rotation
+     * through the quaternion conversion. The exchange format therefore mirrors
+     * the up axis: the columns are `[right, −up, forward]`, the right-handed
+     * counterpart of the camera frame. [fromRotationMatrix] is the exact
+     * inverse, and the sensor layer writes the same layout in
+     * `cameraBasisMatrix`.
      */
     fun toRotationMatrix(): DoubleArray = doubleArrayOf(
-        rightX, upX, forwardX,
-        rightY, upY, forwardY,
-        rightZ, upZ, forwardZ,
+        rightX, -upX, forwardX,
+        rightY, -upY, forwardY,
+        rightZ, -upZ, forwardZ,
     )
 
     /** The [yawDegrees]/[pitchDegrees]/[rollDegrees] this basis was built from. */
@@ -175,18 +183,20 @@ class CameraBasis private constructor(
          * right-handed, as the refinement pipeline produces.
          *
          * The vectors live in the matrix's *columns*, matching [toRotationMatrix]:
-         * the storage is `[right, up, forward]` laid out one component-row at a
-         * time, so a column is read at stride 3. Reading the rows instead would
-         * transpose the basis — which for a level frame collapses every forward
-         * onto due north and stacks all the frames of a capture on one longitude.
+         * the storage is `[right, −up, forward]` laid out one component-row at a
+         * time, so a column is read at stride 3 — and the up column is mirrored
+         * back to the camera's own left-handed triple. Reading the rows instead
+         * would transpose the basis — which for a level frame collapses every
+         * forward onto due north and stacks all the frames of a capture on one
+         * longitude.
          */
         fun fromRotationMatrix(matrix: DoubleArray): CameraBasis = CameraBasis(
             rightX = matrix[0],
             rightY = matrix[3],
             rightZ = matrix[6],
-            upX = matrix[1],
-            upY = matrix[4],
-            upZ = matrix[7],
+            upX = -matrix[1],
+            upY = -matrix[4],
+            upZ = -matrix[7],
             forwardX = matrix[2],
             forwardY = matrix[5],
             forwardZ = matrix[8],

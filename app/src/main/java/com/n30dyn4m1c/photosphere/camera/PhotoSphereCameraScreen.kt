@@ -124,6 +124,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.yield
 import java.io.File
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -232,10 +233,12 @@ fun PhotoSphereCameraScreen(
     // How tall the output canvas is, as a span of latitude. A sphere covers the
     // poles (180°); a ring covers only the band of latitude its level frames
     // reach, widened past the vertical field of view so tilt or refinement can
-    // not push content off the canvas.
+    // not push content off the canvas. A ring is capped at 180°: GPano cannot
+    // express a taller span, and throwing over it would discard the render.
     val latitudeSpanDegrees = when (captureScope) {
         SphereCaptureScope.Sphere -> 180f
-        SphereCaptureScope.Ring -> fieldOfView.verticalDegrees * RING_LATITUDE_SPAN_FACTOR
+        SphereCaptureScope.Ring ->
+            (fieldOfView.verticalDegrees * RING_LATITUDE_SPAN_FACTOR).coerceAtMost(180f)
     }
 
     val currentFieldOfView by rememberUpdatedState(fieldOfView)
@@ -696,9 +699,18 @@ fun PhotoSphereCameraScreen(
      */
     fun startStitch() {
         if (stitchJob != null) return
-        // The stitcher works from where each frame was shot, not just its
-        // pixels: the capture attitude is what places it on the sphere.
-        val frames = buffer.frames.value.map { frame ->
+        val job = scope.launch(start = CoroutineStart.LAZY) {
+            // A shutter can be mid-flight when Finish is tapped: the frame it
+            // is writing would land in the buffer after the snapshot below,
+            // and would be deleted along with the stitched set — a silent
+            // coverage hole. Hold until the in-flight capture settles (the
+            // capture loop shares this dispatcher, so a yield lets it finish)
+            // before freezing the frame set.
+            while (alignment.isCapturing) yield()
+
+            // The stitcher works from where each frame was shot, not just its
+            // pixels: the capture attitude is what places it on the sphere.
+            val frames = buffer.frames.value.map { frame ->
             SphereFrame(
                 file = frame.file,
                 pose = CameraPose(
@@ -717,8 +729,7 @@ fun PhotoSphereCameraScreen(
         }
         stitchProgress.value = StitchProgress.Preparing
 
-        val job = scope.launch(start = CoroutineStart.LAZY) {
-            try {
+        try {
                 PhotoSphereStitcher.stitchPhotos(
                     frames = frames,
                     horizontalFovDegrees = fieldOfView.horizontalDegrees,
@@ -1664,8 +1675,16 @@ private suspend fun ImageCapture.saveFrame(
             requests.first().file
         }
 
-        buffer.commitBestFrame(best, index, orientation)
-        Result.success(best)
+        // A null commit means the frame belonged to a session that has since
+        // been cancelled (Restart while the shutter was in flight) and was
+        // dropped with its file. Reporting it as success would advance the
+        // plan past a target that was never captured, leaving a hole in the
+        // sphere; the failure path leaves the index in place for a retry.
+        val committed = buffer.commitBestFrame(best, index, orientation)
+            ?: return Result.failure(
+                IllegalStateException("session superseded, frame not captured")
+            )
+        Result.success(committed.file)
     } catch (e: CancellationException) {
         // Leaving the screen mid-shutter is not a capture failure; let the
         // cancellation travel rather than reporting it to the user.

@@ -15,6 +15,8 @@ import com.n30dyn4m1c.photosphere.metadata.GPanoXmpInjector
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -90,8 +92,12 @@ object SphereImageStore {
     )
 
     /** Identifier for one run of guided capture. Sorts chronologically. */
-    fun newSessionId(): String =
-        SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+    fun newSessionId(): String {
+        // Millisecond precision: the manager is recreated on configuration
+        // changes, and two sessions born in the same second would share a
+        // directory and silently mix their frames.
+        return SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
+    }
 
     /**
      * Directory holding the frames of [sessionId], created if needed.
@@ -260,8 +266,11 @@ object SphereImageStore {
      * marker that makes viewers treat this as a sphere is written by the last
      * thing to touch the file. Neither pass re-encodes the image.
      *
-     * A sphere left over from an earlier run is deleted first: only one is ever
-     * in play, and each is several megabytes.
+     * The new sphere is built up under a temporary name and moved onto its final
+     * name only once it is complete. The previous sphere is cleared *after* that
+     * swap, so a failed encode or metadata pass never destroys the last good
+     * output — the user keeps the older sphere instead of being left with
+     * nothing. Only one sphere is ever in play, and each is several megabytes.
      *
      * Blocking I/O and a full-size compress — call off the main thread. Throws
      * [IOException] if the encode fails.
@@ -273,31 +282,43 @@ object SphereImageStore {
         gpano: GPanoMetadata = GPanoMetadata.forFullPano(bitmap.width, bitmap.height),
     ): StitchedSphere {
         val directory = spheresDirectory(context)
-        directory.listFiles()?.forEach { stale ->
-            if (!stale.delete()) Log.w(TAG, "Could not clear stale sphere ${stale.name}")
-        }
 
         val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
         val file = File(directory, "sphere_%s.jpg".format(timestamp))
+        val temp = File(directory, file.name + ".tmp")
 
         try {
-            FileOutputStream(file).use { out ->
+            FileOutputStream(temp).use { out ->
                 if (!bitmap.compress(Bitmap.CompressFormat.JPEG, quality, out)) {
                     throw IOException("Could not encode the stitched sphere")
                 }
             }
+            stampSphereDescription(temp)
+            GPanoXmpInjector.inject(temp, gpano)
+                .onFailure { error ->
+                    // Recoverable: the file is a valid 2:1 JPEG either way, it
+                    // will simply open flat instead of as a sphere.
+                    Log.w(TAG, "Could not write GPano metadata for ${file.name}", error)
+                }
+            // The new sphere is complete; move it into place (atomically — the
+            // name is fresh, but REPLACE_EXISTING also absorbs a same-second
+            // collision) and only then drop the previous one.
+            try {
+                Files.move(temp.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING)
+            } catch (e: IOException) {
+                Log.w(TAG, "Could not finalise ${file.name}", e)
+                throw e
+            }
         } catch (e: Exception) {
-            file.delete()
+            temp.delete()
             throw e
         }
 
-        stampSphereDescription(file)
-        GPanoXmpInjector.inject(file, gpano)
-            .onFailure { error ->
-                // Recoverable: the file is a valid 2:1 JPEG either way, it will
-                // simply open flat instead of as a sphere.
-                Log.w(TAG, "Could not write GPano metadata for ${file.name}", error)
+        directory.listFiles()?.forEach { stale ->
+            if (stale != file && !stale.delete()) {
+                Log.w(TAG, "Could not clear stale sphere ${stale.name}")
             }
+        }
 
         return StitchedSphere(file = file, width = bitmap.width, height = bitmap.height)
     }

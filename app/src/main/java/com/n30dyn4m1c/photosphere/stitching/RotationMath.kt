@@ -62,11 +62,19 @@ internal object RotationMath {
 
     /** Geodesic distance between two rotations, in radians. */
     fun angle(a: DoubleArray, b: DoubleArray): Double {
-        var trace = 0.0
-        for (i in 0..2) {
-            for (j in 0..2) trace += a[i * 3 + j] * b[i * 3 + j]
-        }
-        return acos(((trace - 1.0) / 2.0).coerceIn(-1.0, 1.0))
+        val relative = multiply(transpose(a), b)
+        // The cosine from the trace, and the sine from the skew part of the
+        // relative rotation. `acos` alone would amplify the last bits of
+        // roundoff in the trace into a phantom angle when the rotations are
+        // nearly identical (the trace sum is only exact to a few ulps, and
+        // d(acos)/dx diverges at x = 1) — with atan2(sin, cos) an identical
+        // pair reports exactly 0 and a close pair is exact to first order.
+        val cos = ((relative[0] + relative[4] + relative[8] - 1.0) / 2.0).coerceIn(-1.0, 1.0)
+        val s1 = relative[7] - relative[5]
+        val s2 = relative[2] - relative[6]
+        val s3 = relative[3] - relative[1]
+        val sin = 0.5 * sqrt(s1 * s1 + s2 * s2 + s3 * s3)
+        return atan2(sin, cos)
     }
 
     /** The rotation taking [from] to [to], both unit vectors. */

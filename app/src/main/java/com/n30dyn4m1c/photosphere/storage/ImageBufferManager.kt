@@ -20,6 +20,8 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 
 private const val TAG = "ImageBufferManager"
 
@@ -47,7 +49,7 @@ data class BufferedFrame(
     /** Side tilt at capture, -180°..180°. */
     val rollDegrees: Float,
     /**
-     * The camera's basis as a rotation matrix — the `[right, up, forward]`
+     * The camera's basis as a rotation matrix — the `[right, −up, forward]`
      * columns in the world frame, in the `CameraBasis.toRotationMatrix` layout.
      * Present for every frame the tracker captured, and what the stitcher
      * reconstructs the pose from: it carries the orientation exactly where the
@@ -170,13 +172,15 @@ class ImageBufferManager(
 
         var winner = best
         if (canonical != null && best != canonical) {
-            if (canonical.exists() && !canonical.delete()) {
-                Log.w(TAG, "Could not replace ${canonical.name}")
-            }
-            if (best.renameTo(canonical)) {
+            // An atomic replace: the promotion either lands whole or leaves the
+            // previous attempt in place. Deleting the canonical first would open
+            // a window where both copies of the index are gone if the process
+            // died between the two calls.
+            try {
+                Files.move(best.toPath(), canonical.toPath(), StandardCopyOption.REPLACE_EXISTING)
                 winner = canonical
-            } else {
-                Log.w(TAG, "Could not promote ${best.name} to ${canonical.name}")
+            } catch (e: IOException) {
+                Log.w(TAG, "Could not promote ${best.name} to ${canonical.name}", e)
             }
         }
 

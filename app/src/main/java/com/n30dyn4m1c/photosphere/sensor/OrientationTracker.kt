@@ -57,10 +57,10 @@ data class OrientationData(
     /** `SensorEvent.timestamp` of the sample, in nanoseconds of uptime. */
     val timestampNanos: Long = 0L,
     /**
-     * The camera's basis as a rotation matrix — the `[right, up, forward]`
-     * columns in the world frame, laid out exactly as
-     * `CameraBasis.toRotationMatrix` (stitching) arranges them, so it can be
-     * handed to `CameraBasis.fromRotationMatrix` without a transpose.
+     * The camera's basis as a rotation matrix — laid out exactly as
+     * `CameraBasis.toRotationMatrix` (stitching) arranges them (the
+     * `[right, −up, forward]` columns in the world frame), so it can be handed
+     * to `CameraBasis.fromRotationMatrix` without a transpose.
      *
      * Carried alongside the angles because a pose is averaged and
      * reconstructed as a *rotation*: the Euler components collapse into each
@@ -451,11 +451,15 @@ internal fun normalizeDegrees(degrees: Float): Float {
  * device→world matrix [deviceToWorld].
  *
  * The columns are the camera's axes expressed in the world frame —
- * `[right, up, forward]` — laid out exactly as `CameraBasis.toRotationMatrix`
+ * `[right, −up, forward]` — laid out exactly as `CameraBasis.toRotationMatrix`
  * (stitching) arranges them, so a basis written here can be handed to
- * `CameraBasis.fromRotationMatrix` without a transpose. The matrix is row-major
- * with the device axes as its columns: column c is the world coordinates of
- * device axis c, so the camera looks along -Z.
+ * `CameraBasis.fromRotationMatrix` without a transpose. The camera's own
+ * (right, up, forward) triple is left-handed, so the up column is mirrored to
+ * make the matrix a proper rotation: the dwell is averaged as rotations and
+ * the refinement pipeline assumes proper ones, which an unmirrored column
+ * would silently corrupt (a 90° error through the quaternion conversion).
+ * The matrix is row-major with the device axes as its columns: column c is
+ * the world coordinates of device axis c, so the camera looks along -Z.
  *
  * [displayRotation] decides which device axis is the image's right/up, exactly
  * as in [cameraAnglesDegrees] — a phone turned landscape keeps reporting where
@@ -502,9 +506,9 @@ internal fun cameraBasisMatrix(
         }
     }
 
-    out[0] = rx; out[1] = ux; out[2] = fx
-    out[3] = ry; out[4] = uy; out[5] = fy
-    out[6] = rz; out[7] = uz; out[8] = fz
+    out[0] = rx; out[1] = -ux; out[2] = fx
+    out[3] = ry; out[4] = -uy; out[5] = fy
+    out[6] = rz; out[7] = -uz; out[8] = fz
     return out
 }
 
@@ -550,9 +554,12 @@ internal fun anglesFromCameraBasis(basis: FloatArray, out: FloatArray): FloatArr
     val rx = basis[0].toDouble()
     val ry = basis[3].toDouble()
     val rz = basis[6].toDouble()
-    val ux = basis[1].toDouble()
-    val uy = basis[4].toDouble()
-    val uz = basis[7].toDouble()
+    // The stored matrix mirrors the up axis (`[right, −up, forward]` columns,
+    // so rotation algebra sees a proper rotation); un-mirror it back to the
+    // camera's own up before measuring the roll against it.
+    val ux = -basis[1].toDouble()
+    val uy = -basis[4].toDouble()
+    val uz = -basis[7].toDouble()
     val sinRoll = -(rx * up0X + ry * up0Y + rz * up0Z)
     val cosRoll = ux * up0X + uy * up0Y + uz * up0Z
 
