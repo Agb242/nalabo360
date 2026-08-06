@@ -22,6 +22,17 @@ data class CameraPose(
     val yawDegrees: Float,
     val pitchDegrees: Float,
     val rollDegrees: Float,
+    /**
+     * The camera's basis as a rotation matrix, when the pose was measured as
+     * one — the `[right, up, forward]` columns in the world frame, in the
+     * [CameraBasis.toRotationMatrix] layout. The sensor layer provides it for
+     * every captured frame: the dwell is averaged as *rotations*, because the
+     * Euler components collapse into each other at the zenith (pitch ±90°),
+     * where yaw alone cannot say which way is up in the frame.
+     * [CameraBasis.of] prefers it when present; the angles are kept for EXIF,
+     * diagnostics and the viewfinder.
+     */
+    val matrix: DoubleArray? = null,
 ) {
     /** Height above the horizon, positive up. */
     val elevationDegrees: Float get() = -pitchDegrees
@@ -118,6 +129,12 @@ class CameraBasis private constructor(
          * Rodrigues' formula collapses to a plain rotation within their plane.
          */
         fun of(pose: CameraPose): CameraBasis {
+            // A measured basis is exact where the angles are not: the sensor
+            // averaged the dwell as a rotation, and at the zenith the angles
+            // alone cannot say which way is up in the frame. It wins when
+            // present.
+            pose.matrix?.let { return fromRotationMatrix(it) }
+
             val yaw = Math.toRadians(pose.yawDegrees.toDouble())
             val elevation = Math.toRadians(pose.elevationDegrees.toDouble())
             val roll = Math.toRadians(pose.rollDegrees.toDouble())

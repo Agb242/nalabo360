@@ -705,6 +705,13 @@ fun PhotoSphereCameraScreen(
                     yawDegrees = frame.yawDegrees,
                     pitchDegrees = frame.pitchDegrees,
                     rollDegrees = frame.rollDegrees,
+                    // The measured basis travels alongside the angles so a
+                    // frame shot near the zenith keeps its true orientation:
+                    // there yaw and roll collapse into each other and the
+                    // angles alone cannot place it.
+                    matrix = frame.cameraBasis?.let { basis ->
+                        DoubleArray(basis.size) { basis[it].toDouble() }
+                    },
                 ),
             )
         }

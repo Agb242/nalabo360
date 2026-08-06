@@ -386,76 +386,89 @@ object PhotoSphereStitcher {
 
                 var image = readFrame(frame.file, maxInputDimension)
 
-                // A frame must land on the sphere the same way its pose describes
-                // it. The pose is display-upright, so a frame that decoded in the
-                // sensor's native (landscape) orientation — its EXIF rotation tag
-                // missing, or lost when the metadata rewrite re-encoded the JPEG
-                // — has to be turned upright *here*, or its content paints onto
-                // the sphere rotated 90° against the measured pose and no two
-                // frames line up. `portraitRotationDegrees` is exactly the turn
-                // CameraX would have recorded in the tag.
-                if (image.cols() > image.rows() && portraitRotationDegrees % 180 == 90) {
-                    Log.w(
+                // From here the frame is owned by this iteration: a failure
+                // before it is handed to `decoded` — the FOV correction, the
+                // intrinsics, the placement — must not leak its native buffer.
+                // Mat.release is idempotent, so releasing one that
+                // `rotateClockwise` already released on its way out is safe.
+                try {
+                    // A frame must land on the sphere the same way its pose
+                    // describes it. The pose is display-upright, so a frame that
+                    // decoded in the sensor's native (landscape) orientation —
+                    // its EXIF rotation tag missing, or lost when the metadata
+                    // rewrite re-encoded the JPEG — has to be turned upright
+                    // *here*, or its content paints onto the sphere rotated 90°
+                    // against the measured pose and no two frames line up.
+                    // `portraitRotationDegrees` is exactly the turn CameraX
+                    // would have recorded in the tag.
+                    if (image.cols() > image.rows() && portraitRotationDegrees % 180 == 90) {
+                        Log.w(
+                            TAG,
+                            "Frame $position decoded ${image.cols()}x${image.rows()} — " +
+                                "transposed against the ${horizontalFov}°x${verticalFov}° FOV; " +
+                                "rotating ${portraitRotationDegrees}° clockwise",
+                        )
+                        image = rotateClockwise(image, portraitRotationDegrees)
+                    }
+                    Log.i(
                         TAG,
-                        "Frame $position decoded ${image.cols()}x${image.rows()} — " +
-                            "transposed against the ${horizontalFov}°x${verticalFov}° FOV; " +
-                            "rotating ${portraitRotationDegrees}° clockwise",
+                        "Frame $position decoded ${image.cols()}x${image.rows()} at pose " +
+                            "yaw=${frame.pose.yawDegrees}° pitch=${frame.pose.pitchDegrees}° " +
+                            "roll=${frame.pose.rollDegrees}°",
                     )
-                    image = rotateClockwise(image, portraitRotationDegrees)
-                }
-                Log.i(
-                    TAG,
-                    "Frame $position decoded ${image.cols()}x${image.rows()} at pose " +
-                        "yaw=${frame.pose.yawDegrees}° pitch=${frame.pose.pitchDegrees}° " +
-                        "roll=${frame.pose.rollDegrees}°",
-                )
-                if (debugColorFrames) {
-                    // Paint the frame a solid colour so the finished pano shows
-                    // exactly where each frame was placed — the placement check.
-                    image.setTo(DEBUG_FRAME_COLORS[position % DEBUG_FRAME_COLORS.size])
-                }
-                if (!fovChecked) {
-                    val corrected = correctFovOrientation(
+                    if (debugColorFrames) {
+                        // Paint the frame a solid colour so the finished pano
+                        // shows exactly where each frame was placed — the
+                        // placement check.
+                        image.setTo(DEBUG_FRAME_COLORS[position % DEBUG_FRAME_COLORS.size])
+                    }
+                    if (!fovChecked) {
+                        val corrected = correctFovOrientation(
+                            widthPx = image.cols(),
+                            heightPx = image.rows(),
+                            horizontalFovDegrees = horizontalFov,
+                            verticalFovDegrees = verticalFov,
+                        )
+                        if (corrected != null) {
+                            Log.w(
+                                TAG,
+                                "FOV ${horizontalFov}°x${verticalFov}° does not match the " +
+                                    "${image.cols()}x${image.rows()} frame; using " +
+                                    "${corrected.first}°x${corrected.second}°",
+                            )
+                            horizontalFov = corrected.first
+                            verticalFov = corrected.second
+                        }
+                        fovChecked = true
+                    }
+                    // The lens's unitless coefficients are converted against the
+                    // focal length *this* decoded frame implies, so a frame
+                    // subsampled to any size still carries the same physical
+                    // lens.
+                    val intrinsics = FrameIntrinsics.forLens(
                         widthPx = image.cols(),
                         heightPx = image.rows(),
                         horizontalFovDegrees = horizontalFov,
                         verticalFovDegrees = verticalFov,
+                        distortion = radialDistortion,
                     )
-                    if (corrected != null) {
-                        Log.w(
-                            TAG,
-                            "FOV ${horizontalFov}°x${verticalFov}° does not match the " +
-                                "${image.cols()}x${image.rows()} frame; using " +
-                                "${corrected.first}°x${corrected.second}°",
+                    if (position == 0) {
+                        canvasWidth = canvasWidthFor(
+                            frameWidthPx = image.cols(),
+                            horizontalFovDegrees = horizontalFov,
+                            maxOutputWidth = maxOutputWidth,
+                            longitudeSpanDegrees = longitudeSpanDegrees,
                         )
-                        horizontalFov = corrected.first
-                        verticalFov = corrected.second
                     }
-                    fovChecked = true
-                }
-                // The lens's unitless coefficients are converted against the
-                // focal length *this* decoded frame implies, so a frame
-                // subsampled to any size still carries the same physical lens.
-                val intrinsics = FrameIntrinsics.forLens(
-                    widthPx = image.cols(),
-                    heightPx = image.rows(),
-                    horizontalFovDegrees = horizontalFov,
-                    verticalFovDegrees = verticalFov,
-                    distortion = radialDistortion,
-                )
-                if (position == 0) {
-                    canvasWidth = canvasWidthFor(
-                        frameWidthPx = image.cols(),
-                        horizontalFovDegrees = horizontalFov,
-                        maxOutputWidth = maxOutputWidth,
-                        longitudeSpanDegrees = longitudeSpanDegrees,
+                    decoded += DecodedFrame(
+                        image = image,
+                        intrinsics = intrinsics,
+                        sensorBasis = CameraBasis.of(frame.pose),
                     )
+                } catch (e: Throwable) {
+                    image.release()
+                    throw e
                 }
-                decoded += DecodedFrame(
-                    image = image,
-                    intrinsics = intrinsics,
-                    sensorBasis = CameraBasis.of(frame.pose),
-                )
             }
             onProgress(StitchProgress(StitchStage.Reading, frames.size, frames.size))
             val canvasHeight = canvasHeightFor(canvasWidth, longitudeSpanDegrees, latitudeSpanDegrees)

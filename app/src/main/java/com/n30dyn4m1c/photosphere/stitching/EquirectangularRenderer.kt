@@ -130,6 +130,16 @@ internal object EquirectangularRenderer {
         val progressTotal = (levelCount - 1) + levelOneBandCount + levelZeroBandCount
         var progressDone = 0
 
+        // The coarse accumulator chain and the level-one accumulator are owned
+        // at this scope, not inside the happy path, so a render that fails
+        // midway can still release every pyramid mat the happy path had not
+        // got to (see the catch below). Mat.release is idempotent: releasing
+        // an accumulator the happy path already released — or one it aliases
+        // (`levelOneAcc` is `acc` on a two-level canvas) — is safe.
+        val coarse = ArrayList<MultibandBlender.PyramidLevel>(levelCount - 1)
+        var acc: Mat? = null
+        var levelOneAcc: Mat? = null
+
         try {
             if (levelCount <= 1) {
                 // Degenerate canvas (shorter than the coarsest band): the
@@ -177,8 +187,6 @@ internal object EquirectangularRenderer {
                     onBandComplete(progressDone, progressTotal)
                 }
             } else {
-                val coarse = ArrayList<MultibandBlender.PyramidLevel>(levelCount - 1)
-
                 // -- Level accumulation --------------------------------------
                 // Levels 1..L accumulate over their whole (small) canvas. Level
                 // 0 accumulates band by band, later, once its coarser content
@@ -214,19 +222,26 @@ internal object EquirectangularRenderer {
                 // -- Coarse reconstruction ------------------------------------
                 // Levels L down to 2 rebuild whole-canvas; they are small, and
                 // the bands they expand into are a fraction of the canvas.
-                var acc = MultibandBlender.normalizeColor(
+                acc = MultibandBlender.normalizeColor(
                     coarse[levelCount - 2].color,
                     coarse[levelCount - 2].weight,
                 )
                 for (level in (levelCount - 2) downTo 2) {
                     checkCancelled()
+                    // The accumulator from the previous pass (or the
+                    // initialisation above) is always set here; the compiler
+                    // cannot see that through the loop, so the rebuild and the
+                    // release work from a non-null local.
+                    val current = checkNotNull(acc) {
+                        "coarse accumulator missing at level $level"
+                    }
                     val (width, height) = MultibandBlender.levelSize(canvasWidth, canvasHeight, level)
                     val (coarseWidth, coarseHeight) =
                         MultibandBlender.levelSize(canvasWidth, canvasHeight, level + 1)
                     val next = MultibandBlender.reconstructBand(
                         colorBand = coarse[level - 1].color,
                         weightBand = coarse[level - 1].weight,
-                        coarseAcc = acc,
+                        coarseAcc = current,
                         coarseColor = coarse[level].color,
                         coarseWeight = coarse[level].weight,
                         canvasWidth = width,
@@ -236,7 +251,7 @@ internal object EquirectangularRenderer {
                         bandTop = 0,
                         bandHeight = height,
                     )
-                    acc.release()
+                    current.release()
                     acc = next
                     // The level this iteration just folded in (level 3 or up) is
                     // spent; level 2 is still needed by the level-1 bands, and
@@ -251,7 +266,6 @@ internal object EquirectangularRenderer {
                 // -- Level-1 reconstruction, banded --------------------------
                 val (levelOneWidth, levelOneHeight) =
                     MultibandBlender.levelSize(canvasWidth, canvasHeight, 1)
-                val levelOneAcc: Mat
                 if (levelCount >= 3) {
                     val (levelTwoWidth, levelTwoHeight) =
                         MultibandBlender.levelSize(canvasWidth, canvasHeight, 2)
@@ -297,6 +311,12 @@ internal object EquirectangularRenderer {
                 }
 
                 // -- Level-0 reconstruction, banded, into the canvas ----------
+                // Exactly one of the branches above built the level-one
+                // accumulator; from here it is owned by the level-0 bands and
+                // released once they are done.
+                val levelOne = checkNotNull(levelOneAcc) {
+                    "level-one accumulator was not built"
+                }
                 for (band in 0 until levelZeroBandCount) {
                     checkCancelled()
                     val bandTop = band * BAND_HEIGHT
@@ -326,7 +346,7 @@ internal object EquirectangularRenderer {
                         val band = MultibandBlender.reconstructBand(
                             colorBand = color,
                             weightBand = weight,
-                            coarseAcc = levelOneAcc,
+                            coarseAcc = levelOne,
                             coarseColor = coarse[0].color,
                             coarseWeight = coarse[0].weight,
                             canvasWidth = canvasWidth,
@@ -350,11 +370,19 @@ internal object EquirectangularRenderer {
                     progressDone++
                     onBandComplete(progressDone, progressTotal)
                 }
-                levelOneAcc.release()
+                levelOne.release()
                 coarse[0].color.release()
                 coarse[0].weight.release()
             }
         } catch (e: Throwable) {
+            // The happy path releases the pyramid progressively as it rebuilds
+            // it; on a failure it has released only the levels it got past, so
+            // release whatever is still held. Mat.release is idempotent, and
+            // `levelOneAcc` may alias `acc` on a two-level canvas, so
+            // releasing any of these twice is safe.
+            coarse.forEach { it.release() }
+            acc?.release()
+            levelOneAcc?.release()
             canvas.release()
             throw e
         }

@@ -46,6 +46,15 @@ data class BufferedFrame(
     val pitchDegrees: Float,
     /** Side tilt at capture, -180°..180°. */
     val rollDegrees: Float,
+    /**
+     * The camera's basis as a rotation matrix — the `[right, up, forward]`
+     * columns in the world frame, in the `CameraBasis.toRotationMatrix` layout.
+     * Present for every frame the tracker captured, and what the stitcher
+     * reconstructs the pose from: it carries the orientation exactly where the
+     * Euler components collapse (a frame aimed at the zenith). Null for frames
+     * recorded without a sensor sample, e.g. in tests.
+     */
+    val cameraBasis: FloatArray? = null,
     /** Wall clock at capture, for ordering frames of equal index. */
     val capturedAtMillis: Long,
 ) {
@@ -224,6 +233,7 @@ class ImageBufferManager(
             yawDegrees = orientation.yawDegrees,
             pitchDegrees = orientation.pitchDegrees,
             rollDegrees = orientation.rollDegrees,
+            cameraBasis = orientation.cameraBasis,
             capturedAtMillis = System.currentTimeMillis(),
         )
 
