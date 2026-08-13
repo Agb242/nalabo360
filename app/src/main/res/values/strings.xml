@@ -16,6 +16,8 @@
     <string name="capture_scope_sphere">Sphere</string>
     <string name="capture_scope_ring">Horizon ring</string>
     <string name="capture_progress_frames">frames</string>
+    <!-- Spoken by a screen reader in place of the progress pill's separate numbers. -->
+    <string name="capture_progress_description">%1$d of %2$d frames captured</string>
     <string name="capture_rings">%1$d of %2$d bands</string>
     <string name="capture_lock_focusing">Focusing…</string>
     <string name="capture_lock_locked">Focus locked · AE &amp; WB locked</string>
@@ -78,6 +80,10 @@
     <string name="result_share">Share</string>
     <string name="result_share_failed">No app on this device can receive a photo.</string>
     <string name="result_take_another">New photo</string>
+    <string name="result_discard_title">Discard this photo?</string>
+    <string name="result_discard_message">It hasn\'t been saved to your gallery yet, so starting a new one deletes it for good.</string>
+    <string name="result_discard_confirm">Discard</string>
+    <string name="result_discard_cancel">Keep it</string>
 
     <!-- Orientation debug screen. Developer-facing, reachable only in debuggable builds. -->
     <string name="orientation_debug_title">Orientation tracker</string>

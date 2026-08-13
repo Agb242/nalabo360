@@ -28,13 +28,23 @@ import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -45,7 +55,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material3.Button
@@ -79,11 +88,14 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -114,6 +126,14 @@ import com.n30dyn4m1c.photosphere.storage.ImageBufferManager
 import com.n30dyn4m1c.photosphere.storage.SphereImageStore
 import com.n30dyn4m1c.photosphere.storage.SphereImageStore.StitchedSphere
 import com.n30dyn4m1c.photosphere.storage.rememberImageBufferManager
+import com.n30dyn4m1c.photosphere.ui.theme.ChromeScrim
+import com.n30dyn4m1c.photosphere.ui.theme.GlassContent
+import com.n30dyn4m1c.photosphere.ui.theme.GlassContentDim
+import com.n30dyn4m1c.photosphere.ui.theme.GlassSurface
+import com.n30dyn4m1c.photosphere.ui.theme.GlassSurfaceDim
+import com.n30dyn4m1c.photosphere.ui.theme.PillShape
+import com.n30dyn4m1c.photosphere.ui.theme.SphereAccent
+import com.n30dyn4m1c.photosphere.ui.theme.SphereSurface
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
@@ -990,28 +1010,37 @@ private fun CaptureHud(
     modifier: Modifier = Modifier,
 ) {
     Box(modifier = modifier) {
-        // A soft scrim keeps the top chrome readable over a bright sky.
+        // Soft gradient washes top and bottom, so the chrome stays legible
+        // whatever the lens is pointed at. Both ends need one: the guidance line
+        // and the finish button sit over live scene just as the progress pill
+        // does, and white-on-bright-sky at the bottom of the frame is exactly as
+        // unreadable as it is at the top.
         Box(
             modifier = Modifier
                 .align(Alignment.TopCenter)
                 .fillMaxWidth()
                 .height(200.dp)
-                .background(
-                    Brush.verticalGradient(
-                        listOf(Color.Black.copy(alpha = 0.55f), Color.Transparent),
-                    )
-                ),
+                .background(Brush.verticalGradient(listOf(ChromeScrim, Color.Transparent))),
+        )
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .height(260.dp)
+                .background(Brush.verticalGradient(listOf(Color.Transparent, ChromeScrim))),
         )
 
         // The StreetView-style undo: drop the last shot and put its target back
         // on the reticle. Sits top-left, clear of the centred progress pill.
-        if (canUndo) {
-            UndoButton(
-                onUndo = onUndo,
-                modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .padding(start = 20.dp, top = 22.dp),
-            )
+        AnimatedVisibility(
+            visible = canUndo,
+            enter = fadeIn() + scaleIn(initialScale = 0.8f),
+            exit = fadeOut() + scaleOut(targetScale = 0.8f),
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .padding(start = 20.dp, top = 22.dp),
+        ) {
+            UndoButton(onUndo = onUndo)
         }
 
         Column(
@@ -1059,28 +1088,28 @@ private fun CaptureHud(
                     TextButton(onClick = onToggleDistortion) {
                         Text(
                             text = "Dist: ${if (distortionEnabled) "on" else "off"}",
-                            color = Color.White.copy(alpha = 0.8f),
+                            color = GlassContentDim,
                             style = MaterialTheme.typography.labelMedium,
                         )
                     }
                     TextButton(onClick = onToggleRefinement) {
                         Text(
                             text = "Refine: ${if (refinementEnabled) "on" else "off"}",
-                            color = Color.White.copy(alpha = 0.8f),
+                            color = GlassContentDim,
                             style = MaterialTheme.typography.labelMedium,
                         )
                     }
                     TextButton(onClick = onToggleSeams) {
                         Text(
                             text = "Seam: ${if (seamEnabled) "on" else "off"}",
-                            color = Color.White.copy(alpha = 0.8f),
+                            color = GlassContentDim,
                             style = MaterialTheme.typography.labelMedium,
                         )
                     }
                     TextButton(onClick = onToggleColorFrames) {
                         Text(
                             text = "Color: ${if (colorFrames) "on" else "off"}",
-                            color = Color.White.copy(alpha = 0.8f),
+                            color = GlassContentDim,
                             style = MaterialTheme.typography.labelMedium,
                         )
                     }
@@ -1089,12 +1118,23 @@ private fun CaptureHud(
             // Offered as soon as there is enough to stitch, not only at the
             // end: a user who has covered what they care about should not have
             // to walk the remaining targets to get a sphere out of it.
-            if (canStitch) {
+            //
+            // It arrives on an animation rather than appearing between frames.
+            // The moment the third frame lands is the moment the run stops being
+            // an all-or-nothing walk and becomes something the user can end
+            // whenever they like — that is worth a beat of motion to notice,
+            // where a button materialising under a thumb is just a mis-tap
+            // waiting to happen.
+            AnimatedVisibility(
+                visible = canStitch,
+                enter = fadeIn() + expandVertically() + scaleIn(initialScale = 0.94f),
+                exit = fadeOut() + shrinkVertically(),
+            ) {
                 Button(
                     onClick = onFinish,
-                    shape = RoundedCornerShape(50),
+                    shape = PillShape,
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = CaptureAccent,
+                        containerColor = SphereAccent,
                         contentColor = Color.Black,
                     ),
                     modifier = Modifier
@@ -1108,11 +1148,16 @@ private fun CaptureHud(
                     )
                 }
             }
-            if (isComplete) {
+            AnimatedVisibility(
+                visible = isComplete,
+                enter = fadeIn(),
+                exit = fadeOut(),
+            ) {
                 TextButton(onClick = onRestart) {
                     Text(
                         text = stringResource(R.string.capture_restart),
-                        color = Color.White.copy(alpha = 0.9f),
+                        color = GlassContent,
+                        style = MaterialTheme.typography.labelLarge,
                     )
                 }
             }
@@ -1133,17 +1178,31 @@ private fun CaptureScopeSelector(
     onScopeChange: (SphereCaptureScope) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    // One track holding two segments, rather than two free-floating pills: the
+    // choice is exclusive, and a shared trough is what says so before the label
+    // is even read.
     Row(
-        modifier = modifier,
+        modifier = modifier
+            .clip(PillShape)
+            .background(GlassSurfaceDim)
+            .padding(3.dp)
+            .selectableGroup(),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        horizontalArrangement = Arrangement.spacedBy(3.dp),
     ) {
         SphereCaptureScope.entries.forEach { option ->
             val selected = option == scope
             Surface(
-                shape = RoundedCornerShape(50),
-                color = if (selected) CaptureAccent else Color.Black.copy(alpha = 0.4f),
-                onClick = { if (enabled) onScopeChange(option) },
+                shape = PillShape,
+                color = if (selected) SphereAccent else Color.Transparent,
+                // Passed to the Surface rather than checked inside onClick. The
+                // old form left a disabled segment fully clickable as far as the
+                // framework was concerned: it took the ripple, and TalkBack
+                // announced an actionable button that silently did nothing once
+                // the first frame had locked the choice in.
+                enabled = enabled,
+                selected = selected,
+                onClick = { onScopeChange(option) },
             ) {
                 Text(
                     text = when (option) {
@@ -1152,12 +1211,12 @@ private fun CaptureScopeSelector(
                     },
                     style = MaterialTheme.typography.labelMedium,
                     fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-                    color = if (selected) {
-                        Color.Black
-                    } else {
-                        Color.White.copy(alpha = if (enabled) 0.9f else 0.45f)
+                    color = when {
+                        selected -> Color.Black
+                        enabled -> GlassContent
+                        else -> GlassContentDim
                     },
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 7.dp),
                 )
             }
         }
@@ -1178,56 +1237,82 @@ private fun CaptureProgressPill(
     ringCount: Int,
     modifier: Modifier = Modifier,
 ) {
+    // Spoken as one sentence. Left to itself the pill hands a screen reader
+    // "12", "/ 48", "frames", a bare progress bar and then "1 of 3 bands" as
+    // five unrelated announcements — the one number that matters during a
+    // capture, arriving as rubble.
+    val spoken = stringResource(R.string.capture_progress_description, capturedCount, totalTargets)
+    val spokenWithBands = if (ringCount > 1) {
+        spoken + ", " + stringResource(R.string.capture_rings, completedRings, ringCount)
+    } else {
+        spoken
+    }
+
+    // The bar animates to each new value instead of stepping. A frame landing is
+    // the one moment of feedback in a capture the user is not watching the screen
+    // for, and a bar that slides is visible in peripheral vision where a jump is
+    // not.
+    val fraction by animateFloatAsState(
+        targetValue = if (totalTargets > 0) capturedCount.toFloat() / totalTargets else 0f,
+        animationSpec = tween(durationMillis = 420, easing = FastOutSlowInEasing),
+        label = "capture-progress",
+    )
+
     Surface(
-        modifier = modifier,
-        shape = RoundedCornerShape(50),
-        color = Color.Black.copy(alpha = 0.5f),
+        modifier = modifier.clearAndSetSemantics { contentDescription = spokenWithBands },
+        shape = PillShape,
+        color = GlassSurface,
         shadowElevation = 8.dp,
     ) {
         Column(
-            modifier = Modifier.padding(horizontal = 22.dp, vertical = 10.dp),
+            modifier = Modifier.padding(horizontal = 24.dp, vertical = 11.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
+            // The count is the hero of the HUD — it is what the user glances
+            // down at between targets — so it is set at display weight with the
+            // total trailing it as quiet metadata rather than as its equal.
             Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.Bottom,
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
             ) {
                 Text(
                     text = "$capturedCount",
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Bold,
-                    color = Color.White,
+                    style = MaterialTheme.typography.displaySmall,
+                    color = GlassContent,
                 )
                 Text(
                     text = "/ $totalTargets",
                     style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Medium,
-                    color = Color.White.copy(alpha = 0.6f),
+                    color = GlassContentDim,
+                    modifier = Modifier.padding(bottom = 4.dp),
                 )
                 Text(
                     text = stringResource(R.string.capture_progress_frames),
                     style = MaterialTheme.typography.labelSmall,
-                    color = Color.White.copy(alpha = 0.6f),
+                    color = GlassContentDim,
+                    modifier = Modifier.padding(bottom = 5.dp),
                 )
             }
             if (totalTargets > 0) {
                 LinearProgressIndicator(
-                    progress = { capturedCount.toFloat() / totalTargets },
+                    progress = { fraction },
                     modifier = Modifier
-                        .padding(top = 7.dp)
-                        .fillMaxWidth(0.75f)
+                        .padding(top = 8.dp)
+                        .fillMaxWidth(0.8f)
                         .height(3.dp)
-                        .clip(RoundedCornerShape(50)),
-                    color = CaptureAccent,
-                    trackColor = Color.White.copy(alpha = 0.25f),
+                        .clip(PillShape),
+                    color = SphereAccent,
+                    trackColor = GlassContent.copy(alpha = 0.22f),
+                    gapSize = 0.dp,
+                    drawStopIndicator = {},
                 )
             }
             if (ringCount > 1) {
                 Text(
                     text = stringResource(R.string.capture_rings, completedRings, ringCount),
                     style = MaterialTheme.typography.labelSmall,
-                    color = Color.White.copy(alpha = 0.7f),
-                    modifier = Modifier.padding(top = 6.dp),
+                    color = GlassContentDim,
+                    modifier = Modifier.padding(top = 7.dp),
                 )
             }
         }
@@ -1247,14 +1332,14 @@ private fun UndoButton(
     Surface(
         modifier = modifier,
         shape = CircleShape,
-        color = Color.Black.copy(alpha = 0.5f),
+        color = GlassSurface,
         shadowElevation = 8.dp,
     ) {
         IconButton(onClick = onUndo) {
             Icon(
                 imageVector = Icons.AutoMirrored.Filled.Undo,
                 contentDescription = stringResource(R.string.capture_undo),
-                tint = Color.White,
+                tint = GlassContent,
             )
         }
     }
@@ -1268,30 +1353,38 @@ private fun FocusLockChip(
 ) {
     Surface(
         modifier = modifier,
-        shape = RoundedCornerShape(50),
-        color = Color.Black.copy(alpha = 0.5f),
+        shape = PillShape,
+        color = GlassSurface,
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp),
+            modifier = Modifier.padding(start = 10.dp, end = 13.dp, top = 6.dp, bottom = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            horizontalArrangement = Arrangement.spacedBy(7.dp),
         ) {
             Box(
                 modifier = Modifier
                     .size(6.dp)
-                    .clip(RoundedCornerShape(50))
-                    .background(CaptureAccent),
+                    .clip(CircleShape)
+                    .background(SphereAccent),
             )
             Text(
                 text = text,
                 style = MaterialTheme.typography.labelMedium,
-                color = Color.White.copy(alpha = 0.85f),
+                color = GlassContent.copy(alpha = 0.88f),
             )
         }
     }
 }
 
-/** The single line of guidance, in a glass card over the bottom of the frame. */
+/**
+ * The single line of guidance, in a glass card over the bottom of the frame.
+ *
+ * The text crossfades rather than swapping. This one line is the app's entire
+ * running commentary — searching, holding, band covered, compass unreliable —
+ * and a hard cut between two similar-length sentences at arm's length is easy
+ * to miss entirely. A short dissolve is what makes "something just changed"
+ * register without the user having to be reading it at that instant.
+ */
 @Composable
 private fun HintCard(
     text: String,
@@ -1299,22 +1392,25 @@ private fun HintCard(
 ) {
     Surface(
         modifier = modifier,
-        shape = RoundedCornerShape(16.dp),
-        color = Color.Black.copy(alpha = 0.5f),
+        shape = MaterialTheme.shapes.medium,
+        color = GlassSurface,
         shadowElevation = 6.dp,
     ) {
-        Text(
-            text = text,
-            style = MaterialTheme.typography.bodyLarge,
-            color = Color.White,
-            textAlign = TextAlign.Center,
-            modifier = Modifier.padding(horizontal = 18.dp, vertical = 12.dp),
-        )
+        Crossfade(
+            targetState = text,
+            animationSpec = tween(durationMillis = 220),
+            label = "capture-hint",
+        ) { current ->
+            Text(
+                text = current,
+                style = MaterialTheme.typography.bodyLarge,
+                color = GlassContent,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 13.dp),
+            )
+        }
     }
 }
-
-/** The accent used across the capture chrome: a confident photographic green. */
-private val CaptureAccent = Color(0xFF3DDC84)
 
 /**
  * The one-shot welcome shown before the first frame.
@@ -1355,8 +1451,8 @@ private fun CaptureInstructions(
                     scaleX = 0.92f + 0.08f * appear.value
                     scaleY = 0.92f + 0.08f * appear.value
                 },
-            shape = RoundedCornerShape(28.dp),
-            color = Color(0xFF11161A),
+            shape = MaterialTheme.shapes.extraLarge,
+            color = SphereSurface,
             tonalElevation = 6.dp,
             shadowElevation = 24.dp,
         ) {
@@ -1373,12 +1469,12 @@ private fun CaptureInstructions(
                         text = stringResource(R.string.capture_instructions_title),
                         style = MaterialTheme.typography.headlineSmall,
                         fontWeight = FontWeight.Bold,
-                        color = Color.White,
+                        color = GlassContent,
                     )
                     Text(
                         text = stringResource(R.string.capture_instructions_subtitle),
                         style = MaterialTheme.typography.labelLarge,
-                        color = CaptureAccent,
+                        color = SphereAccent,
                         letterSpacing = 2.sp,
                     )
                 }
@@ -1399,9 +1495,9 @@ private fun CaptureInstructions(
 
                 Button(
                     onClick = onDismiss,
-                    shape = RoundedCornerShape(50),
+                    shape = PillShape,
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = CaptureAccent,
+                        containerColor = SphereAccent,
                         contentColor = Color.Black,
                     ),
                     modifier = Modifier
@@ -1435,15 +1531,15 @@ private fun InstructionStep(
         Box(
             modifier = Modifier
                 .size(32.dp)
-                .clip(RoundedCornerShape(50))
-                .background(CaptureAccent.copy(alpha = 0.18f)),
+                .clip(CircleShape)
+                .background(SphereAccent.copy(alpha = 0.18f)),
             contentAlignment = Alignment.Center,
         ) {
             Text(
                 text = "$number",
                 style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.Bold,
-                color = CaptureAccent,
+                color = SphereAccent,
             )
         }
         Column(modifier = Modifier.weight(1f)) {
@@ -1451,12 +1547,12 @@ private fun InstructionStep(
                 text = label,
                 style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.SemiBold,
-                color = Color.White,
+                color = GlassContent,
             )
             Text(
                 text = detail,
                 style = MaterialTheme.typography.bodyMedium,
-                color = Color.White.copy(alpha = 0.75f),
+                color = GlassContent.copy(alpha = 0.75f),
             )
         }
     }
@@ -1484,38 +1580,97 @@ private fun StitchingDialog(
         ),
     ) {
         Surface(
-            shape = RoundedCornerShape(24.dp),
+            shape = MaterialTheme.shapes.large,
+            color = MaterialTheme.colorScheme.surface,
             tonalElevation = 6.dp,
+            shadowElevation = 24.dp,
         ) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(24.dp),
+                    .padding(horizontal = 28.dp, vertical = 30.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(16.dp),
+                verticalArrangement = Arrangement.spacedBy(20.dp),
             ) {
-                Text(
-                    text = stringResource(R.string.stitch_title),
-                    style = MaterialTheme.typography.titleMedium,
-                )
-
+                // The indicator is the subject here rather than a decoration
+                // beside the text: a stitch is minutes of a blocked screen, and
+                // the one thing the user wants from it is visible evidence that
+                // it is still moving.
                 val fraction = progress.fraction
-                if (fraction != null) {
-                    CircularProgressIndicator(progress = { fraction })
-                } else {
-                    // Everything inside OpenCV's stitch call is opaque, so the
-                    // spinner spins rather than reporting a made-up percentage.
-                    CircularProgressIndicator()
+                Box(contentAlignment = Alignment.Center) {
+                    // A full-circle track behind the sweep, so an early stage at
+                    // 4% still reads as a ring rather than as a stray tick.
+                    CircularProgressIndicator(
+                        progress = { 1f },
+                        modifier = Modifier.size(72.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        strokeWidth = 5.dp,
+                        strokeCap = StrokeCap.Round,
+                        gapSize = 0.dp,
+                    )
+                    if (fraction != null) {
+                        // Animated so the ring sweeps between stages instead of
+                        // teleporting: the stages are coarse, and a jump from
+                        // "reading" to "blending" looks like a glitch.
+                        val animated by animateFloatAsState(
+                            targetValue = fraction,
+                            animationSpec = tween(durationMillis = 500, easing = FastOutSlowInEasing),
+                            label = "stitch-progress",
+                        )
+                        CircularProgressIndicator(
+                            progress = { animated },
+                            modifier = Modifier.size(72.dp),
+                            color = SphereAccent,
+                            strokeWidth = 5.dp,
+                            strokeCap = StrokeCap.Round,
+                            gapSize = 0.dp,
+                        )
+                        Text(
+                            text = "${(animated * 100).roundToInt()}%",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                    } else {
+                        // Everything inside OpenCV's stitch call is opaque, so the
+                        // spinner spins rather than reporting a made-up percentage.
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(72.dp),
+                            color = SphereAccent,
+                            strokeWidth = 5.dp,
+                            strokeCap = StrokeCap.Round,
+                        )
+                    }
                 }
 
-                Text(
-                    text = progress.label(),
-                    style = MaterialTheme.typography.bodyMedium,
-                    textAlign = TextAlign.Center,
-                )
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Text(
+                        text = stringResource(R.string.stitch_title),
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        textAlign = TextAlign.Center,
+                    )
+                    Crossfade(
+                        targetState = progress.label(),
+                        animationSpec = tween(durationMillis = 220),
+                        label = "stitch-stage",
+                    ) { label ->
+                        Text(
+                            text = label,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = TextAlign.Center,
+                        )
+                    }
+                }
 
                 TextButton(onClick = onCancel) {
-                    Text(stringResource(R.string.stitch_cancel))
+                    Text(
+                        text = stringResource(R.string.stitch_cancel),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             }
         }

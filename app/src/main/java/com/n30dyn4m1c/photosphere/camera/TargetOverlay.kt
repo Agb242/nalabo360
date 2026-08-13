@@ -26,6 +26,8 @@ import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.n30dyn4m1c.photosphere.sensor.OrientationData
+import com.n30dyn4m1c.photosphere.ui.theme.SphereAccent
+import com.n30dyn4m1c.photosphere.ui.theme.SphereActive
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.min
@@ -54,9 +56,9 @@ data class TargetOverlayColors(
     companion object {
         val Default = TargetOverlayColors(
             reticle = Color.White.copy(alpha = 0.9f),
-            reticleAligned = Color(0xFF3DDC84),
-            active = Color(0xFFFFC24B),
-            completed = Color(0xFF3DDC84),
+            reticleAligned = SphereAccent,
+            active = SphereActive,
+            completed = SphereAccent,
             pending = Color.White.copy(alpha = 0.32f),
             guide = Color.White.copy(alpha = 0.24f),
         )
@@ -171,8 +173,8 @@ fun FocusReticleOverlay(
 
     Canvas(modifier = modifier.fillMaxSize()) {
         val color = when {
-            focus.isWorking -> Color(0xFFFFC24B)
-            focus.isLocked -> Color(0xFF3DDC84)
+            focus.isWorking -> SphereActive
+            focus.isLocked -> SphereAccent
             else -> Color.White.copy(alpha = 0.9f)
         }
 

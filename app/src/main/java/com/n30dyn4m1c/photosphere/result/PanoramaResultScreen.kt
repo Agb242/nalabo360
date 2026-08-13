@@ -10,21 +10,25 @@ import android.util.Log
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.outlined.WarningAmber
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -34,6 +38,7 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -61,6 +66,8 @@ import com.n30dyn4m1c.photosphere.storage.MediaExporter
 import com.n30dyn4m1c.photosphere.storage.SphereImageStore
 import com.n30dyn4m1c.photosphere.storage.SphereImageStore.StitchedSphere
 import com.n30dyn4m1c.photosphere.stitching.sampleSizeFor
+import com.n30dyn4m1c.photosphere.ui.theme.PhotoWell
+import com.n30dyn4m1c.photosphere.ui.theme.PillShape
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -129,53 +136,79 @@ fun PanoramaResultScreen(
         }
     }
 
+    // Leaving discards the sphere, and the file is only in the cache — so if it
+    // has not been exported, "back" is a delete. Both routes out ask first; see
+    // [DiscardConfirmation].
+    var isConfirmingDiscard by remember(sphere.file) { mutableStateOf(false) }
+    val isSaved = exportState is ExportState.Done
+
+    /** Leaves the screen, pausing to confirm if the photo would be lost. */
+    fun leave() {
+        if (isSaved) onTakeAnother() else isConfirmingDiscard = true
+    }
+
     // Back means "I'm done with this one" — the same thing the button does.
     // Without this, back would leave the activity with a sphere still cached.
-    BackHandler(onBack = onTakeAnother)
+    BackHandler(onBack = ::leave)
+
+    if (isConfirmingDiscard) {
+        DiscardConfirmation(
+            onDismiss = { isConfirmingDiscard = false },
+            onDiscard = {
+                isConfirmingDiscard = false
+                onTakeAnother()
+            },
+        )
+    }
 
     Scaffold(
         modifier = modifier.fillMaxSize(),
+        containerColor = MaterialTheme.colorScheme.background,
         snackbarHost = { SnackbarHost(snackbarHostState) },
     ) { insets ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(insets)
-                .padding(horizontal = 24.dp, vertical = 16.dp),
+                .padding(horizontal = 20.dp, vertical = 12.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(16.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
+            // The header is deliberately compact — a badge, a title, a line of
+            // metadata. Everything above the photograph is space taken from the
+            // photograph, and on this screen the photograph is the reason the
+            // user is here.
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(5.dp),
             ) {
                 Surface(
-                    shape = RoundedCornerShape(50),
+                    shape = PillShape,
                     color = MaterialTheme.colorScheme.primaryContainer,
                 ) {
                     Text(
                         text = stringResource(R.string.result_badge),
-                        style = MaterialTheme.typography.labelLarge,
+                        style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onPrimaryContainer,
-                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 5.dp),
+                        modifier = Modifier.padding(horizontal = 13.dp, vertical = 5.dp),
                     )
                 }
                 Text(
                     text = stringResource(R.string.result_title),
-                    style = MaterialTheme.typography.headlineMedium,
-                    fontWeight = FontWeight.Bold,
+                    style = MaterialTheme.typography.headlineSmall,
+                    color = MaterialTheme.colorScheme.onBackground,
                     textAlign = TextAlign.Center,
                 )
                 Text(
                     text = stringResource(R.string.result_dimensions, sphere.width, sphere.height),
-                    style = MaterialTheme.typography.bodyMedium,
+                    style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
 
                 if (BuildConfig.DEBUG && sphere.diagnostics != null) {
                     Surface(
-                        shape = RoundedCornerShape(12.dp),
+                        shape = MaterialTheme.shapes.small,
                         color = MaterialTheme.colorScheme.surfaceVariant,
                         modifier = Modifier
                             .fillMaxWidth()
@@ -241,10 +274,51 @@ fun PanoramaResultScreen(
                         }
                     }
                 },
-                onTakeAnother = onTakeAnother,
+                onTakeAnother = ::leave,
             )
         }
     }
+}
+
+/**
+ * Asks before throwing away a sphere that only exists in the cache.
+ *
+ * Starting a new capture — or pressing back — deletes this one, and until it has
+ * been exported the cached JPEG is the only copy there is. That is minutes of
+ * standing in one place turning on the spot, undone by one tap on a button
+ * sitting directly beside "Share". Once the photo has been saved to the gallery
+ * the question stops being worth asking, and this never appears.
+ */
+@Composable
+private fun DiscardConfirmation(
+    onDismiss: () -> Unit,
+    onDiscard: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = {
+            Icon(
+                imageVector = Icons.Outlined.WarningAmber,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.secondary,
+            )
+        },
+        title = { Text(stringResource(R.string.result_discard_title)) },
+        text = { Text(stringResource(R.string.result_discard_message)) },
+        confirmButton = {
+            TextButton(onClick = onDiscard) {
+                Text(
+                    text = stringResource(R.string.result_discard_confirm),
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text(stringResource(R.string.result_discard_cancel))
+            }
+        },
+    )
 }
 
 /** The equirectangular frame, letterboxed into whatever space is going. */
@@ -258,8 +332,18 @@ private fun SpherePreview(
         modifier = modifier
             // Clipped as well as filled, so the image inside takes the rounded
             // corners rather than painting over them.
-            .clip(RoundedCornerShape(16.dp))
-            .background(Color(0xFF101010)),
+            .clip(MaterialTheme.shapes.medium)
+            // A well darker than the surface around it, with a hairline to
+            // define the edge: an equirectangular frame has black wedges at the
+            // poles wherever the run did not reach, and without a border those
+            // wedges bleed into the background and the photo appears to have no
+            // edges at all.
+            .background(PhotoWell)
+            .border(
+                width = 1.dp,
+                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f),
+                shape = MaterialTheme.shapes.medium,
+            ),
         contentAlignment = Alignment.Center,
     ) {
         when {
@@ -300,14 +384,35 @@ private fun ResultActions(
     Column(
         modifier = modifier.fillMaxWidth(),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
+        // Save is the one action with consequences, so it gets the full width,
+        // the filled treatment and a thumb-sized target; share and discard sit
+        // below it as equals. The hierarchy is the recommendation.
         Button(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(54.dp),
+            shape = PillShape,
             // Disabled once it has landed rather than hidden: "Saved to gallery"
             // is the answer to "did that work?", and re-tapping would only file a
             // second copy.
             enabled = !isWorking && !isExported,
+            colors = ButtonDefaults.buttonColors(
+                // A landed export keeps the accent instead of greying out. It is
+                // disabled because the work is done, not because it is
+                // unavailable, and a dimmed control reads as the latter.
+                disabledContainerColor = if (isExported) {
+                    MaterialTheme.colorScheme.primary.copy(alpha = 0.22f)
+                } else {
+                    MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f)
+                },
+                disabledContentColor = if (isExported) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+                },
+            ),
             onClick = onExport,
         ) {
             when {
@@ -320,7 +425,8 @@ private fun ResultActions(
                 else -> Icon(Icons.Filled.PhotoLibrary, contentDescription = null)
             }
             Text(
-                modifier = Modifier.padding(start = 8.dp),
+                modifier = Modifier.padding(start = 10.dp),
+                style = MaterialTheme.typography.titleMedium,
                 text = when {
                     isWorking -> stringResource(R.string.result_exporting)
                     isExported -> stringResource(R.string.result_exported)
@@ -331,27 +437,41 @@ private fun ResultActions(
 
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             OutlinedButton(
-                modifier = Modifier.weight(1f),
+                modifier = Modifier
+                    .weight(1f)
+                    .height(50.dp),
+                shape = PillShape,
                 enabled = !isWorking,
                 onClick = onShare,
             ) {
-                Icon(Icons.Filled.Share, contentDescription = null)
+                Icon(
+                    imageVector = Icons.Filled.Share,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                )
                 Text(
                     modifier = Modifier.padding(start = 8.dp),
                     text = stringResource(R.string.result_share),
                 )
             }
             OutlinedButton(
-                modifier = Modifier.weight(1f),
+                modifier = Modifier
+                    .weight(1f)
+                    .height(50.dp),
+                shape = PillShape,
                 // Held back during an export: the sphere it is copying from is
                 // the file this button deletes.
                 enabled = !isWorking,
                 onClick = onTakeAnother,
             ) {
-                Icon(Icons.Filled.Refresh, contentDescription = null)
+                Icon(
+                    imageVector = Icons.Filled.Refresh,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                )
                 Text(
                     modifier = Modifier.padding(start = 8.dp),
                     text = stringResource(R.string.result_take_another),
@@ -361,7 +481,6 @@ private fun ResultActions(
 
         if (exportState is ExportState.Done) {
             Text(
-                modifier = Modifier.padding(top = 4.dp),
                 text = stringResource(
                     R.string.result_export_location,
                     MediaExporter.RELATIVE_PATH,
