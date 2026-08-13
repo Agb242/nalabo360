@@ -18,9 +18,9 @@ result screen offers it to the gallery and the share sheet.
 
 | Tool | Version |
 | --- | --- |
-| Android Gradle Plugin | 8.7.3 |
-| Gradle | 8.14.3 (via wrapper) |
-| Kotlin | 2.0.21 |
+| Android Gradle Plugin | 9.3.1 |
+| Gradle | 9.5.0 (via wrapper) |
+| Kotlin | 2.2.10 |
 | JDK | 17 |
 | compileSdk / targetSdk | 35 |
 | minSdk | 26 |
@@ -178,6 +178,20 @@ gates the capture UI. It:
 - re-checks the grant on resume, so returning from Settings recovers without a
   restart.
 
+The grant is read back from the system rather than inferred from the launcher's
+result map, and that is load-bearing. When the dialog is dismissed **without an
+answer** — swiped away, interrupted by an incoming call, screen locked —
+`RequestMultiplePermissions` delivers an *empty* map, and
+`emptyMap().values.all { it }` is vacuously `true`: read straight from the map, a
+cancellation counts as a grant and drops the user onto the capture screen with no
+camera permission, where the bind fails and the viewfinder is simply black.
+
+That same cancellation must not be routed to the "permanently denied" branch
+either. `shouldShowRequestPermissionRationale` reads `false` after a cancel, so
+trusting it there would send someone who never answered the dialog off to the
+Settings app to fix a setting they had not touched. Only an explicit denial the
+system will no longer surface a dialog for earns that trip.
+
 ## Project layout
 
 ```
@@ -209,8 +223,84 @@ app/src/main/java/com/n30dyn4m1c/photosphere/
 │   ├── SphereImageStore.kt      # cache sessions, the finished sphere, EXIF
 │   ├── MediaExporter.kt         # MediaStore write into Pictures/360Panoramas
 │   └── ImageBufferManager.kt    # this run's frames + their capture attitude
-└── ui/theme/                    # Material 3 theme
+└── ui/theme/
+    ├── Color.kt                 # the one palette: signals, glass, surfaces
+    ├── Theme.kt                 # the scheme — dark always, no dynamic colour
+    ├── Type.kt                  # the type scale
+    └── Shape.kt                 # the corner-radius ladder + PillShape
 ```
+
+## Interface
+
+Everything the user looks at sits on top of either a live viewfinder or a
+finished photograph, and that one fact settles most of the design decisions.
+The palette, type scale and shape ladder live in
+[`ui/theme/`](app/src/main/java/com/n30dyn4m1c/photosphere/ui/theme/) and are
+defined once each — the two signal colours in particular were previously hex
+literals repeated across three files, which is how a design drifts.
+
+### Dark always, and no dynamic colour
+
+`PhotoSphereTheme` takes no `darkTheme` or `dynamicColor` parameter. Both were
+removed deliberately:
+
+- **Dark in every configuration.** A light chrome around a viewfinder throws
+  light back at the user in exactly the situation where they are judging
+  exposure, and it tints the photograph it surrounds. The capture screen is
+  pinned to black regardless, so following the system into a light scheme only
+  ever produced a light result screen bolted onto a black capture screen.
+- **Material You off.** Dynamic colour repaints the interface from the user's
+  wallpaper. Guided capture is built on exactly two signals — accent for
+  "captured", active for "aim here next" — and they may not survive that
+  repaint as two colours that contrast with each other, let alone against an
+  arbitrary scene.
+
+Because the app is dark in every configuration, `MainActivity` also pins both
+system bars to **light icons** via `SystemBarStyle.dark(...)`. Left to the
+default they follow the system's day/night setting, and a phone in light mode
+paints dark status-bar icons over a black viewfinder.
+
+`res/values/colors.xml` holds `sphere_background`, the window background the
+platform paints before Compose takes over. It must stay in step with
+`SphereBackground` in `Color.kt` or every cold start flashes the wrong dark.
+
+### The two signals
+
+| Token | Meaning |
+| --- | --- |
+| `SphereAccent` (green) | aligned, locked, captured, complete — the "yes" |
+| `SphereActive` (amber) | the live target the reticle is being sent to |
+
+They are warm/cool opposites so the two never trade places at a glance, and
+both are bright enough to hold against a blown-out sky or a dark room. They are
+shared by the HUD and by `TargetOverlayColors`, so the marker on the overlay and
+the progress bar in the pill are the same green by construction.
+
+### Chrome over a moving image
+
+The HUD is one translucent material (`GlassSurface` / `GlassSurfaceDim`) rather
+than a handful of similar blacks, and gradient scrims run along **both** the top
+and the bottom of the frame — the guidance line and the finish button sit over
+live scene just as the progress pill does.
+
+Motion is used only where it carries meaning: the finish button arrives on an
+animation because the moment it appears is the moment the run stops being
+all-or-nothing; the progress bar slides so a landing frame registers in
+peripheral vision; the guidance line and the stitch stage crossfade so a change
+is noticeable without being read at that instant.
+
+### Accessibility
+
+The progress pill is collapsed to a single spoken sentence
+(`capture_progress_description`) — left to itself it handed a screen reader
+"12", "/ 48", "frames", a bare progress bar and "1 of 3 bands" as five unrelated
+announcements. Controls that are conditionally inert, such as the capture-scope
+selector once the first frame has locked the plan in, pass `enabled` to the
+component rather than checking it inside `onClick`, so a disabled control is not
+announced as actionable.
+
+Guided capture itself — aiming a reticle at a marker — remains unusable without
+sight; see the open issues.
 
 ## Device orientation
 
@@ -646,6 +736,13 @@ not have to be deleted out of the camera roll afterwards. "New photo" discards
 the cached JPEG and returns to capture with an empty buffer; the system back
 gesture does the same thing.
 
+Because that cached JPEG is the only copy until an export lands, both routes out
+**confirm first** while the sphere is unsaved — "New photo" sits directly beside
+"Share", and a stray tap on it (or a back gesture) would otherwise throw away
+several minutes of standing in one spot turning around, silently. Once the photo
+has been written to the gallery the question stops being worth asking and the
+prompt no longer appears.
+
 **Export.** [`MediaExporter`](app/src/main/java/com/n30dyn4m1c/photosphere/storage/MediaExporter.kt)
 copies the file into `Pictures/360Panoramas` through MediaStore. From API 29 the
 row is inserted with `IS_PENDING = 1`, the bytes are streamed into the URI
@@ -662,17 +759,38 @@ since API 24, so it travels as a `content://` URI from the app's `FileProvider`
 (`res/xml/file_paths.xml` exposes `cacheDir/spheres/` and nothing else) with a
 read grant attached.
 
-## Not implemented yet
+## Status
 
-- **Focal-length refinement** is implemented — the pose refinement solves a
-  per-frame focal correction from the matched bearings and the stitcher projects
-  through it (see [Stitching](#stitching)).
-- **Multi-band blending** is implemented — overlaps resolve to a Laplacian
-  pyramid blend (see above) that fades fine detail over a few pixels and broad
-  illumination over the whole overlap.
-- **Seam carving** is implemented — instead of blending every overlap, a
-  graph-cut finds the assignment of each pixel to the frame that agrees best
-  and cuts there, fading only a few pixels across it (see [Stitching](#stitching)).
+The pipeline features that were once listed here as outstanding have all
+landed:
+
+- **Focal-length refinement** — the pose refinement solves a per-frame focal
+  correction from the matched bearings and the stitcher projects through it (see
+  [Stitching](#stitching)).
+- **Multi-band blending** — overlaps resolve to a Laplacian pyramid blend that
+  fades fine detail over a few pixels and broad illumination over the whole
+  overlap.
+- **Seam carving** — instead of blending every overlap, a graph-cut finds the
+  assignment of each pixel to the frame that agrees best and cuts there, fading
+  only a few pixels across it.
+
+What is still outstanding is tracked in
+[the issue tracker](https://github.com/n30dyn4m1c/360-photo-app/issues). The
+larger items at the time of writing: guided capture cannot be driven without
+sight, the result screen previews the sphere flat rather than as a pannable
+view, there are no instrumented UI tests, the strings are English-only, and the
+activity's hard portrait lock is ignored from Android 16 onward.
+
+## Test builds
+
+Debug APKs are published as
+[GitHub Release](https://github.com/n30dyn4m1c/360-photo-app/releases) assets
+rather than committed to the repository — a debug build of this app is ~43 MB,
+and committing one per rebuild grows the history by that much every time.
+
+To build your own, see [Build](#build); `./gradlew assembleDebug` writes one APK
+per ABI to `app/build/outputs/apk/debug/`. Take `app-arm64-v8a-debug.apk` for
+any modern phone.
 
 ## License
 
