@@ -68,6 +68,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import okio.FileSystem
 import okio.Path
 import okio.Path.Companion.toPath
+import platform.Foundation.NSData
 import platform.Foundation.NSDate
 import platform.Foundation.NSDateFormatter
 import platform.Foundation.NSLocale
