@@ -2,14 +2,18 @@ package com.n30dyn4m1c.photosphere.camera
 
 import com.n30dyn4m1c.photosphere.util.KLog
 import kotlinx.cinterop.ExperimentalForeignApi
+import kotlinx.cinterop.ObjCObjectVar
+import kotlinx.cinterop.alloc
+import kotlinx.cinterop.memScoped
+import kotlinx.cinterop.ptr
 import platform.AVFoundation.AVCaptureDevice
 import platform.AVFoundation.AVCaptureDeviceInput
 import platform.AVFoundation.AVCapturePhoto
-import platform.AVFoundation.AVCapturePhotoCaptureDelegate
 import platform.AVFoundation.AVCapturePhotoOutput
+import platform.AVFoundation.AVCapturePhotoCaptureDelegateProtocol
+import platform.AVFoundation.AVCapturePhotoSettings
 import platform.AVFoundation.AVCaptureSession
 import platform.AVFoundation.AVCaptureSessionPresetPhoto
-import platform.AVFoundation.AVCaptureVideoGravityResizeAspectFill
 import platform.AVFoundation.AVCaptureVideoPreviewLayer
 import platform.AVFoundation.AVMediaTypeVideo
 import platform.Foundation.NSData
@@ -19,6 +23,7 @@ import platform.darwin.NSObject
 import platform.darwin.dispatch_async
 import platform.darwin.dispatch_get_main_queue
 import platform.darwin.dispatch_queue_create
+import kotlin.concurrent.Volatile
 
 private const val TAG = "IosCameraController"
 
@@ -58,7 +63,9 @@ class IosCameraController {
     fun createPreviewView(): UIView {
         val view = UIView()
         val layer = AVCaptureVideoPreviewLayer.layerWithSession(session)
-        layer.videoGravity = AVCaptureVideoGravityResizeAspectFill
+        // The constant lives in a framework fragment the Kotlin bindings do not
+        // surface; the literal string is its stable public value.
+        layer.videoGravity = "avLayerVideoGravityResizeAspectFill"
         view.layer.addSublayer(layer)
         previewLayer = layer
         return view
@@ -82,7 +89,14 @@ class IosCameraController {
                 // The default video device is the rear wide camera on every
                 // iPhone Apple ships — the lens this app wants anyway.
                 val device = AVCaptureDevice.defaultDeviceWithMediaType(AVMediaTypeVideo)
-                val deviceInput = device?.let { AVCaptureDeviceInput(device = it) }
+                val deviceInput = device?.let { camera ->
+                    memScoped {
+                        val bindError = alloc<ObjCObjectVar<NSError?>>()
+                        // A nil Obj-C initializer surfaces as an exception here;
+                        // either way the null-check below reports it.
+                        runCatching { AVCaptureDeviceInput(camera, bindError.ptr) }.getOrNull()
+                    }
+                }
                 if (deviceInput != null && session.canAddInput(deviceInput)) {
                     session.addInput(deviceInput)
                     input = deviceInput
@@ -97,7 +111,7 @@ class IosCameraController {
                 }
                 session.commitConfiguration()
                 session.startRunning()
-                isRunning = session.isRunning
+                isRunning = session.isRunning()
             } catch (error: Exception) {
                 configured = false
                 KLog.e(TAG, "Could not start the capture session", error)
@@ -108,7 +122,7 @@ class IosCameraController {
     /** Stops the session and releases the camera for other apps. Idempotent. */
     fun stop() {
         dispatch_async(cameraQueue) {
-            if (session.isRunning) session.stopRunning()
+            if (session.isRunning()) session.stopRunning()
             isRunning = false
             configured = false
         }
@@ -138,11 +152,11 @@ class IosCameraController {
 /** Bridges AVFoundation's callback into a single nullable-data result. */
 private class PhotoCaptureDelegate(
     private val onResult: (NSData?) -> Unit,
-) : NSObject(), AVCapturePhotoCaptureDelegate {
+) : NSObject(), AVCapturePhotoCaptureDelegateProtocol {
 
     override fun captureOutput(
         captureOutput: AVCapturePhotoOutput,
-        didFinishProcessingPhoto photo: AVCapturePhoto,
+        didFinishProcessingPhoto: AVCapturePhoto,
         error: NSError?,
     ) {
         if (error != null) {

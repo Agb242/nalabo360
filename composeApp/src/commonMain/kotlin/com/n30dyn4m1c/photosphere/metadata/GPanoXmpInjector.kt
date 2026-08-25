@@ -164,9 +164,8 @@ object GPanoXmpInjector {
     /** Tool marker written into the packet, for anyone inspecting the file later. */
     private const val TOOLKIT = "Nalabo360"
 
-    private val XMP_SIGNATURE = "$XMP_NAMESPACE\u0000".toByteArray(Charsets.US_ASCII)
-    private val XMP_EXTENSION_SIGNATURE =
-        "$XMP_EXTENSION_NAMESPACE\u0000".toByteArray(Charsets.US_ASCII)
+    private val XMP_SIGNATURE = asciiBytes("$XMP_NAMESPACE\u0000")
+    private val XMP_EXTENSION_SIGNATURE = asciiBytes("$XMP_EXTENSION_NAMESPACE\u0000")
 
     private const val MARKER_PREFIX = 0xFF
     private const val MARKER_SOI = 0xD8
@@ -243,7 +242,7 @@ object GPanoXmpInjector {
      * ends mid-segment, or the packet will not fit in one `APP1` segment.
      */
     fun inject(source: BufferedSource, sink: BufferedSink, metadata: GPanoMetadata) {
-        val packet = buildXmpPacket(metadata).toByteArray(Charsets.UTF_8)
+        val packet = buildXmpPacket(metadata).encodeToByteArray()
         val segmentLength = SEGMENT_LENGTH_BYTES + XMP_SIGNATURE.size + packet.size
         if (segmentLength > MAX_SEGMENT_LENGTH) {
             throw IOException("XMP packet is $segmentLength bytes, too large for one segment")
@@ -371,6 +370,14 @@ object GPanoXmpInjector {
 
     /** XMP booleans are the words, capitalised — not `1`/`0` or lowercase. */
     private fun Boolean.asXmpBoolean(): String = if (this) "True" else "False"
+
+    /**
+     * The namespaces above are ASCII by definition, so the packet bytes come
+     * from a hand-rolled encoder: `Charsets` lives in the JVM fragment of the
+     * standard library and must stay out of this shared code.
+     */
+    private fun asciiBytes(value: String): ByteArray =
+        ByteArray(value.length) { index -> value[index].code.toByte() }
 
     private fun String.escapeXmlAttribute(): String = buildString(length) {
         this@escapeXmlAttribute.forEach { character ->

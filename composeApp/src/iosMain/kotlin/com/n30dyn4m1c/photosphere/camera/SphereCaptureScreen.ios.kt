@@ -46,7 +46,7 @@ import com.n30dyn4m1c.photosphere.storage.StitchedSphere
 import com.n30dyn4m1c.photosphere.stitching.CameraPose
 import com.n30dyn4m1c.photosphere.stitching.PhotoSphereStitcher
 import com.n30dyn4m1c.photosphere.stitching.RgbImage
-import com.n30dyn4m1c.photosphere.stitching.SphereDeviceProfile
+import com.n30dyn4m1c.photosphere.camera.SphereDeviceProfile
 import com.n30dyn4m1c.photosphere.stitching.SphereFrame
 import com.n30dyn4m1c.photosphere.stitching.StitchException
 import com.n30dyn4m1c.photosphere.stitching.StitchProgress
