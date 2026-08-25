@@ -3,7 +3,7 @@ import UIKit
 import Nalabo360Kit
 
 /// Minimal application delegate: the whole job is to host the shared
-/// Compose UI (`MainKt.MainViewController()`) in a full-screen window.
+/// Compose UI (`IosEntry.createRootViewController()`) in a full-screen window.
 /// There is no storyboard — the window is built here, and the Info.plist
 /// ships an empty `UILaunchScreen` so the app fills modern devices.
 final class AppDelegate: NSObject, UIApplicationDelegate {
@@ -14,7 +14,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
         let window = UIWindow(frame: UIScreen.main.bounds)
-        window.rootViewController = MainKt.MainViewController()
+        window.rootViewController = IosEntry.createRootViewController()
         window.makeKeyAndVisible()
         self.window = window
         return true
