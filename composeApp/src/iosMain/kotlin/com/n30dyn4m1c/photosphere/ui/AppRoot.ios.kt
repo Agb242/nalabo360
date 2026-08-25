@@ -8,9 +8,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import kotlinx.cinterop.ExperimentalForeignApi
-import platform.AVFoundation.AVAuthorizationStatus
+import platform.AVFoundation.AVAuthorizationStatusAuthorized
+import platform.AVFoundation.AVAuthorizationStatusDenied
+import platform.AVFoundation.AVAuthorizationStatusNotDetermined
+import platform.AVFoundation.AVAuthorizationStatusRestricted
 import platform.AVFoundation.AVCaptureDevice
 import platform.AVFoundation.AVMediaTypeVideo
+import platform.AVFoundation.authorizationStatusForMediaType
+import platform.AVFoundation.requestAccessForMediaType
 import platform.Foundation.NSURL
 import platform.UIKit.UIApplication
 
@@ -50,7 +55,7 @@ actual fun RequirePermissions(
     LaunchedEffect(Unit) {
         if (status == PermissionStatus.Unknown &&
             AVCaptureDevice.authorizationStatusForMediaType(AVMediaTypeVideo) ==
-            AVAuthorizationStatus.NotDetermined
+            AVAuthorizationStatusNotDetermined
         ) {
             AVCaptureDevice.requestAccessForMediaType(AVMediaTypeVideo) { _ ->
                 status = currentPermissionStatus()
@@ -80,8 +85,8 @@ actual fun RequirePermissions(
 @OptIn(ExperimentalForeignApi::class)
 private fun currentPermissionStatus(): PermissionStatus =
     when (AVCaptureDevice.authorizationStatusForMediaType(AVMediaTypeVideo)) {
-        AVAuthorizationStatus.Authorized -> PermissionStatus.Granted
-        AVAuthorizationStatus.Denied, AVAuthorizationStatus.Restricted ->
+        AVAuthorizationStatusAuthorized -> PermissionStatus.Granted
+        AVAuthorizationStatusDenied, AVAuthorizationStatusRestricted ->
             PermissionStatus.Denied
         else -> PermissionStatus.Unknown
     }

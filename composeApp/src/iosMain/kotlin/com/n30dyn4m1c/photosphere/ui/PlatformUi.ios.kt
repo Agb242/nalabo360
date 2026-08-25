@@ -1,10 +1,12 @@
+@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
+
 package com.n30dyn4m1c.photosphere.ui
 
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.toComposeImageBitmap
 import com.n30dyn4m1c.photosphere.storage.StitchedSphere
 import com.n30dyn4m1c.photosphere.util.KLog
-import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -12,15 +14,15 @@ import okio.FileSystem
 import okio.Path
 import okio.Path.Companion.toPath
 import org.jetbrains.skia.Image
-import org.jetbrains.skia.toComposeImageBitmap
 import platform.Foundation.NSDate
 import platform.Foundation.NSDateFormatter
 import platform.Foundation.NSLocale
 import platform.Foundation.NSTemporaryDirectory
 import platform.Foundation.NSURL
-import platform.Photos.PHAccessLevel
+import platform.Photos.PHAccessLevelAddOnly
+import platform.Photos.PHAuthorizationStatusAuthorized
+import platform.Photos.PHAuthorizationStatusNotDetermined
 import platform.Photos.PHPhotoLibrary
-import platform.Photos.PHPhotoLibraryAuthorizationStatus
 import platform.UIKit.UIActivityViewController
 import platform.UIKit.UIApplication
 import platform.UIKit.UIImage
@@ -63,9 +65,9 @@ actual suspend fun exportSphereToGallery(sphere: StitchedSphere): Result<Exporte
             val tempPath = (NSTemporaryDirectory() + displayName).toPath()
             FileSystem.SYSTEM.write(tempPath) { write(FileSystem.SYSTEM.read(sphere.file) { readByteArray() }) }
 
-            when (PHPhotoLibrary.authorizationStatusForAccessLevel(PHAccessLevel.AddOnly)) {
-                PHPhotoLibraryAuthorizationStatus.Authorized -> Unit
-                PHPhotoLibraryAuthorizationStatus.NotDetermined ->
+            when (PHPhotoLibrary.authorizationStatusForAccessLevel(PHAccessLevelAddOnly)) {
+                PHAuthorizationStatusAuthorized -> Unit
+                PHAuthorizationStatusNotDetermined ->
                     if (!requestAddOnlyAccess()) {
                         throw IllegalStateException("Photo library access denied")
                     }
@@ -76,8 +78,10 @@ actual suspend fun exportSphereToGallery(sphere: StitchedSphere): Result<Exporte
             // The legacy UIKit save path: permission was settled above, and a
             // refusal surfaces through the system rather than an exception we
             // could show — the sphere stays safe in the cache either way.
+            val image = UIImage.imageWithContentsOfFile(tempPath.toString())
+                ?: throw IllegalStateException("Could not re-read the sphere for export")
             UIImageWriteToSavedPhotosAlbum(
-                /* image = */ UIImage.imageWithContentsOfFile(tempPath.toString()),
+                /* image = */ image,
                 /* completionTarget = */ null,
                 /* completionSelector = */ null,
                 /* contextInfo = */ null,
@@ -100,9 +104,9 @@ actual suspend fun exportSphereToGallery(sphere: StitchedSphere): Result<Exporte
 private suspend fun requestAddOnlyAccess(): Boolean =
     suspendCancellableCoroutine { continuation ->
         PHPhotoLibrary.requestAuthorizationForAccessLevel(
-            /* accessLevel = */ PHAccessLevel.AddOnly,
+            /* accessLevel = */ PHAccessLevelAddOnly,
             /* handler = */ { status ->
-                continuation.resume(status == PHPhotoLibraryAuthorizationStatus.Authorized)
+                continuation.resume(status == PHAuthorizationStatusAuthorized)
             },
         )
     }
@@ -113,7 +117,7 @@ private suspend fun requestAddOnlyAccess(): Boolean =
  * success optimistically — cancelling the sheet is the user's business, not a
  * failure this function could meaningfully return false over.
  */
-@OptIn(ExperimentalForeignApi::class)
+@OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
 actual fun shareSphere(sphere: StitchedSphere, title: String): Boolean {
     val url = NSURL.fileURLWithPath(sphere.file.toString())
     dispatch_async(dispatch_get_main_queue()) {

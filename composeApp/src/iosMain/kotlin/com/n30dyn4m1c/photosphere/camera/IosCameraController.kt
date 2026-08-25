@@ -16,6 +16,7 @@ import platform.AVFoundation.AVCaptureSession
 import platform.AVFoundation.AVCaptureSessionPresetPhoto
 import platform.AVFoundation.AVCaptureVideoPreviewLayer
 import platform.AVFoundation.AVMediaTypeVideo
+import platform.AVFoundation.fileDataRepresentation
 import platform.Foundation.NSData
 import platform.Foundation.NSError
 import platform.UIKit.UIView

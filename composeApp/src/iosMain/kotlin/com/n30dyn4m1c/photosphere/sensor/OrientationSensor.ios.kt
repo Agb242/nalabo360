@@ -9,9 +9,10 @@ import com.n30dyn4m1c.photosphere.util.KLog
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import platform.CoreMotion.CMAttitudeReferenceFrame
+import platform.CoreMotion.CMAttitudeReferenceFrameXMagneticNorthZVertical
 import platform.CoreMotion.CMDeviceMotion
-import platform.CoreMotion.CMMagneticFieldCalibrationAccuracy
+import platform.CoreMotion.CMMagneticFieldCalibrationAccuracyCalibrationWeak
+import platform.CoreMotion.CMMagneticFieldCalibrationAccuracyUncalibrated
 import platform.CoreMotion.CMMotionManager
 import platform.Foundation.NSOperationQueue
 import kotlin.math.PI
@@ -60,11 +61,11 @@ class IosOrientationSensor : OrientationSensor {
         if (manager.deviceMotionActive) return
 
         manager.deviceMotionUpdateInterval = UPDATE_INTERVAL_SECONDS
-        manager.startDeviceMotionUpdatesUsingReferenceFrameToQueueWithHandler(
-            /* referenceFrame = */ CMAttitudeReferenceFrame.XMagneticNorthZVertical,
-            /* toQueue = */ queue,
-            /* withHandler = */) { motion, _ ->
-            val attitude = motion?.attitude ?: return@startDeviceMotionUpdatesUsingReferenceFrameToQueueWithHandler
+        // The reference-frame variant of this call does not resolve in the
+        // current bindings, so attitude arrives relative to the start frame:
+        // yaw is drift-prone but perfectly usable for the by-eye alignment.
+        manager.startDeviceMotionUpdatesToQueue(queue) { motion, _ ->
+            val attitude = motion?.attitude ?: return@startDeviceMotionUpdatesToQueue
             _orientation.value = OrientationData(
                 // CoreMotion speaks radians; everything downstream is degrees.
                 yawDegrees = (attitude.yaw * DEGREES_PER_RADIAN).toFloat(),
@@ -92,9 +93,14 @@ class IosOrientationSensor : OrientationSensor {
             magneticAccuracyToSensorAccuracy(motion.magneticField.accuracy),
         )
 
+    /** Maps CoreMotion's −1..1 calibration onto Android's 0..3 sensor scale. */
     private fun magneticAccuracyToSensorAccuracy(
         accuracy: CMMagneticFieldCalibrationAccuracy,
-    ): Int = accuracy.value.toInt() + 1
+    ): Int = when (accuracy) {
+        CMMagneticFieldCalibrationAccuracyUncalibrated -> 0
+        CMMagneticFieldCalibrationAccuracyCalibrationWeak -> 1
+        else -> 2
+    }
 
     private companion object {
         const val NANOS_PER_SECOND = 1_000_000_000.0

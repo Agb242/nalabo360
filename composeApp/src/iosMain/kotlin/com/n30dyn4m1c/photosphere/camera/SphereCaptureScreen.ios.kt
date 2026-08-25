@@ -38,7 +38,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.UIKitView
-import com.n30dyn4m1c.photosphere.Strings
 import com.n30dyn4m1c.photosphere.metadata.GPanoMetadata
 import com.n30dyn4m1c.photosphere.metadata.GPanoXmpInjector
 import com.n30dyn4m1c.photosphere.sensor.rememberOrientationSensor
@@ -57,6 +56,7 @@ import com.n30dyn4m1c.photosphere.stitching.platformImageCodec
 import com.n30dyn4m1c.photosphere.ui.theme.PillShape
 import com.n30dyn4m1c.photosphere.util.KLog
 import kotlinx.cinterop.ExperimentalForeignApi
+import kotlinx.cinterop.toByteArray
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -234,7 +234,7 @@ actual fun SphereCaptureScreen(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
-                .padding(bottom = 48.dp, horizontal = 32.dp),
+                .padding(start = 32.dp, end = 32.dp, bottom = 48.dp),
             horizontalArrangement = Arrangement.SpaceEvenly,
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -308,6 +308,7 @@ actual fun SphereCaptureScreen(
 }
 
 /** Buffers one photo plus its shutter-time attitude into the session cache. */
+@OptIn(ExperimentalForeignApi::class)
 private fun captureFrame(
     controller: IosCameraController,
     pose: com.n30dyn4m1c.photosphere.sensor.OrientationData,
@@ -324,8 +325,7 @@ private fun captureFrame(
         val index = frames.size
         val file = sessionDirectory / ("frame_" + index.toString().padStart(3, '0') + ".jpg")
         try {
-            val written = data.writeToFile(file.toString(), atomically = true)
-            if (!written) throw IllegalStateException("Disk refused frame $index")
+            FileSystem.SYSTEM.write(file) { write(data.toByteArray()) }
         } catch (error: Exception) {
             KLog.e(TAG, "Could not buffer frame $index", error)
             return@capture
