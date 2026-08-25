@@ -162,6 +162,6 @@ private class PhotoCaptureDelegate(
         if (error != null) {
             KLog.w(TAG, "Capture failed: ${error.localizedDescription}")
         }
-        onResult(photo.fileDataRepresentation())
+        onResult(didFinishProcessingPhoto.fileDataRepresentation())
     }
 }

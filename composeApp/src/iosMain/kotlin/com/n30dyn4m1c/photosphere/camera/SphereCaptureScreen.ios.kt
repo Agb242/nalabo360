@@ -47,6 +47,7 @@ import com.n30dyn4m1c.photosphere.stitching.CameraPose
 import com.n30dyn4m1c.photosphere.stitching.PhotoSphereStitcher
 import com.n30dyn4m1c.photosphere.stitching.RgbImage
 import com.n30dyn4m1c.photosphere.camera.SphereDeviceProfile
+import com.n30dyn4m1c.photosphere.ui.Strings
 import com.n30dyn4m1c.photosphere.stitching.SphereFrame
 import com.n30dyn4m1c.photosphere.stitching.StitchException
 import com.n30dyn4m1c.photosphere.stitching.StitchProgress
@@ -69,7 +70,6 @@ import okio.Path.Companion.toPath
 import platform.Foundation.NSDate
 import platform.Foundation.NSDateFormatter
 import platform.Foundation.NSLocale
-import platform.Foundation.NSLocaleIdentifier
 import platform.Foundation.NSTemporaryDirectory
 
 private const val TAG = "SphereCaptureScreen"
@@ -174,7 +174,9 @@ actual fun SphereCaptureScreen(
                     .onSuccess { image ->
                         // The write survives the result-screen handover that
                         // cancels this coroutine the moment this returns.
-                        val stitched = withContext(Dispatchers.IO + NonCancellable) {
+                        // NonCancellable alone keeps the launch dispatcher:
+                        // Dispatchers.IO is a JVM fragment of coroutines.
+                        val stitched = withContext(NonCancellable) {
                             writeStitchedSphere(image)
                         }
                         frames.forEach { fileSystem.delete(it.file, mustExist = false) }
@@ -317,24 +319,25 @@ private fun captureFrame(
             KLog.w(TAG, "Shutter returned no image")
             return@capture
         }
-        val index = synchronized(frames) { frames.size }
-        val file = sessionDirectory / "frame_%03d.jpg".format(index)
+        // AVFoundation delivers captures on one serial queue, so plain
+        // bookkeeping is safe — `synchronized` does not exist off the JVM.
+        val index = frames.size
+        val file = sessionDirectory / ("frame_" + index.toString().padStart(3, '0') + ".jpg")
         try {
-            FileSystem.SYSTEM.write(file) { write(data.toByteArray()) }
+            val written = data.writeToFile(file.toString(), atomically = true)
+            if (!written) throw IllegalStateException("Disk refused frame $index")
         } catch (error: Exception) {
             KLog.e(TAG, "Could not buffer frame $index", error)
             return@capture
         }
-        synchronized(frames) {
-            frames.add(
-                CapturedFrame(
-                    file = file,
-                    yawDegrees = pose.yawDegrees,
-                    pitchDegrees = pose.pitchDegrees,
-                    rollDegrees = pose.rollDegrees,
-                ),
-            )
-        }
+        frames.add(
+            CapturedFrame(
+                file = file,
+                yawDegrees = pose.yawDegrees,
+                pitchDegrees = pose.pitchDegrees,
+                rollDegrees = pose.rollDegrees,
+            ),
+        )
     }
 }
 
@@ -372,7 +375,7 @@ data class CapturedFrame(
 private fun newSessionId(): String {
     val formatter = NSDateFormatter().apply {
         dateFormat = "yyyyMMdd_HHmmss_SSS"
-        locale = NSLocale(NSLocaleIdentifier("en_US_POSIX"))
+        locale = NSLocale("en_US_POSIX")
     }
     return formatter.stringFromDate(NSDate())
 }
@@ -390,11 +393,11 @@ private fun newSessionDirectory(): Path =
  */
 private fun writeStitchedSphere(image: RgbImage): StitchedSphere {
     val directory = (NSTemporaryDirectory() + "spheres/").toPath()
-    FileSystem.SYSTEM.createDirectory(directory, mustExist = true)
+    FileSystem.SYSTEM.createDirectory(directory)
 
     val timestamp = NSDateFormatter().apply {
         dateFormat = "yyyyMMdd_HHmmss"
-        locale = NSLocale(NSLocaleIdentifier("en_US_POSIX"))
+        locale = NSLocale("en_US_POSIX")
     }.stringFromDate(NSDate())
     val file = directory / "sphere_$timestamp.jpg"
     val temp = directory / (file.name + ".tmp")

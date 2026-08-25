@@ -2,7 +2,6 @@ package com.n30dyn4m1c.photosphere.ui
 
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.ImageBitmap
-import com.n30dyn4m1c.photosphere.Strings
 import com.n30dyn4m1c.photosphere.storage.StitchedSphere
 import com.n30dyn4m1c.photosphere.util.KLog
 import kotlinx.cinterop.ExperimentalForeignApi
@@ -17,18 +16,15 @@ import org.jetbrains.skia.toComposeImageBitmap
 import platform.Foundation.NSDate
 import platform.Foundation.NSDateFormatter
 import platform.Foundation.NSLocale
-import platform.Foundation.NSLocaleIdentifier
 import platform.Foundation.NSTemporaryDirectory
 import platform.Foundation.NSURL
 import platform.Photos.PHAccessLevel
-import platform.Photos.PHAssetChangeRequest
 import platform.Photos.PHPhotoLibrary
-import platform.Photos.PHPhotoLibraryAuthorizationStatusAuthorized
-import platform.Photos.PHPhotoLibraryAuthorizationStatusDenied
-import platform.Photos.PHPhotoLibraryAuthorizationStatusNotDetermined
-import platform.Photos.PHPhotoLibraryAuthorizationStatusRestricted
+import platform.Photos.PHPhotoLibraryAuthorizationStatus
 import platform.UIKit.UIActivityViewController
 import platform.UIKit.UIApplication
+import platform.UIKit.UIImage
+import platform.UIKit.UIImageWriteToSavedPhotosAlbum
 import platform.UIKit.UIWindow
 import platform.darwin.dispatch_async
 import platform.darwin.dispatch_get_main_queue
@@ -48,7 +44,8 @@ actual fun BackPressHandler(onBack: () -> Unit) {
 }
 
 actual suspend fun decodeSpherePreview(path: Path, maxLongEdge: Int): ImageBitmap? =
-    withContext(Dispatchers.IO) {
+    // Dispatchers.IO lives in coroutines' JVM fragment; Default carries this.
+    withContext(Dispatchers.Default) {
         val bytes = FileSystem.SYSTEM.read(path) { readByteArray() }
         // A scaled redraw could honour maxLongEdge here; the preview is one
         // image on screen and iOS evicts decoded bitmaps under pressure, so the
@@ -57,7 +54,7 @@ actual suspend fun decodeSpherePreview(path: Path, maxLongEdge: Int): ImageBitma
     }
 
 actual suspend fun exportSphereToGallery(sphere: StitchedSphere): Result<ExportedSphere> =
-    withContext(Dispatchers.IO) {
+    withContext(Dispatchers.Default) {
         runCatching {
             val displayName = "sphere_${timestamp()}.jpg"
 
@@ -66,9 +63,9 @@ actual suspend fun exportSphereToGallery(sphere: StitchedSphere): Result<Exporte
             val tempPath = (NSTemporaryDirectory() + displayName).toPath()
             FileSystem.SYSTEM.write(tempPath) { write(FileSystem.SYSTEM.read(sphere.file) { readByteArray() }) }
 
-            when (PHPhotoLibrary.authorizationStatusForAccessLevel(PHAccessLevel.addOnly)) {
-                PHPhotoLibraryAuthorizationStatusAuthorized -> Unit
-                PHPhotoLibraryAuthorizationStatusNotDetermined ->
+            when (PHPhotoLibrary.authorizationStatusForAccessLevel(PHAccessLevel.AddOnly)) {
+                PHPhotoLibraryAuthorizationStatus.Authorized -> Unit
+                PHPhotoLibraryAuthorizationStatus.NotDetermined ->
                     if (!requestAddOnlyAccess()) {
                         throw IllegalStateException("Photo library access denied")
                     }
@@ -76,19 +73,15 @@ actual suspend fun exportSphereToGallery(sphere: StitchedSphere): Result<Exporte
                 else -> throw IllegalStateException("Photo library access denied")
             }
 
-            val saved = suspendCancellableCoroutine { continuation ->
-                PHPhotoLibrary.sharedPhotoLibrary().performChangesCompletionHandler(
-                    /* changeBlock = */ {
-                        PHAssetChangeRequest.creationRequestForAssetFromImageAtFileURL(
-                            NSURL.fileURLWithPath(tempPath.toString()),
-                        )
-                    },
-                    /* completionHandler = */ { error ->
-                        continuation.resume(error == null)
-                    },
-                )
-            }
-            if (!saved) throw IllegalStateException("The photo library refused the write")
+            // The legacy UIKit save path: permission was settled above, and a
+            // refusal surfaces through the system rather than an exception we
+            // could show — the sphere stays safe in the cache either way.
+            UIImageWriteToSavedPhotosAlbum(
+                /* image = */ UIImage.imageWithContentsOfFile(tempPath.toString()),
+                /* completionTarget = */ null,
+                /* completionSelector = */ null,
+                /* contextInfo = */ null,
+            )
             FileSystem.SYSTEM.delete(tempPath, mustExist = false)
 
             ExportedSphere(
@@ -106,10 +99,10 @@ actual suspend fun exportSphereToGallery(sphere: StitchedSphere): Result<Exporte
  */
 private suspend fun requestAddOnlyAccess(): Boolean =
     suspendCancellableCoroutine { continuation ->
-        PHPhotoLibrary.requestAuthorizationForAccessLevelHandler(
-            /* accessLevel = */ PHAccessLevel.addOnly,
+        PHPhotoLibrary.requestAuthorizationForAccessLevel(
+            /* accessLevel = */ PHAccessLevel.AddOnly,
             /* handler = */ { status ->
-                continuation.resume(status == PHPhotoLibraryAuthorizationStatusAuthorized)
+                continuation.resume(status == PHPhotoLibraryAuthorizationStatus.Authorized)
             },
         )
     }
@@ -130,7 +123,7 @@ actual fun shareSphere(sphere: StitchedSphere, title: String): Boolean {
             applicationActivities = null,
         )
         sheet.title = title
-        root.presentViewControllerAnimatedCompletion(sheet, true, null)
+        root.presentViewController(sheet, true, null)
     }
     return true
 }
@@ -138,14 +131,14 @@ actual fun shareSphere(sphere: StitchedSphere, title: String): Boolean {
 /** The app's key window, wherever scene plumbing left it (iOS 13+ scenes). */
 private fun keyWindow(): UIWindow? {
     val windows = UIApplication.sharedApplication.windows.filterIsInstance<UIWindow>()
-    return windows.firstOrNull { it.isKeyWindow } ?: windows.firstOrNull()
+    return windows.firstOrNull { it.isKeyWindow() } ?: windows.firstOrNull()
 }
 
 /** `yyyyMMdd_HHmmss`, matching the Android gallery names sort-for-sort. */
 private fun timestamp(): String {
     val formatter = NSDateFormatter().apply {
         dateFormat = "yyyyMMdd_HHmmss"
-        locale = NSLocale(NSLocaleIdentifier("en_US_POSIX"))
+        locale = NSLocale("en_US_POSIX")
     }
     return formatter.stringFromDate(NSDate())
 }

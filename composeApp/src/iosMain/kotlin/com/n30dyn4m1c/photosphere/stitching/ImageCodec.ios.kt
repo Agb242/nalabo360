@@ -13,18 +13,18 @@ import platform.CoreGraphics.CGContextTranslateCTM
 import platform.CoreGraphics.CGImageGetHeight
 import platform.CoreGraphics.CGImageGetWidth
 import platform.CoreGraphics.CGImageAlphaInfo.kCGImageAlphaPremultipliedLast
-import platform.CoreGraphics.CGBitmapInfo.kCGBitmapByteOrder32Big
 import platform.CoreGraphics.CGRectMake
 import platform.Foundation.NSData
-import platform.Foundation.NSURL
-import platform.ImageIO.CGImageSourceCreateImageAtIndex
-import platform.ImageIO.CGImageSourceCreateWithURL
 import platform.UIKit.UIImage
 import platform.UIKit.UIImageJPEGRepresentation
 import platform.posix.memcpy
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
+
+/** Pixels are 3-channel RGB in, 4-channel RGBA through Core Graphics. */
+private const val RGB_CHANNELS = 3
+private const val RGBA_PIXEL_BYTES = 4
 
 /**
  * The iOS half of [ImageCodec]: ImageIO decodes the JPEG straight into a
@@ -40,9 +40,11 @@ import kotlin.math.roundToInt
 internal class IosImageCodec : ImageCodec {
 
     override fun decodeJpeg(path: Path, maxLongEdge: Int): RgbImage? {
-        val url = NSURL.fileURLWithPath(path.toString())
-        val source = CGImageSourceCreateWithURL(url, null) ?: return null
-        val cgImage = CGImageSourceCreateImageAtIndex(source, 0, null) ?: return null
+        // UIImage decodes straight from the file; its CGImage is the raw pixel
+        // buffer — orientation metadata stays separate, which is exactly what
+        // the stitcher expects when it reads EXIF itself.
+        val uiImage = UIImage.imageWithContentsOfFile(path.toString()) ?: return null
+        val cgImage = uiImage.CGImage ?: return null
 
         val srcWidth = CGImageGetWidth(cgImage).toInt()
         val srcHeight = CGImageGetHeight(cgImage).toInt()
@@ -63,8 +65,10 @@ internal class IosImageCodec : ImageCodec {
                 bitsPerComponent = BITS_PER_COMPONENT,
                 bytesPerRow = (width * RGBA_PIXEL_BYTES).toULong(),
                 space = CGColorSpaceCreateDeviceRGB(),
-                bitmapInfo =
-                    kCGImageAlphaPremultipliedLast.value or kCGBitmapByteOrder32Big.value,
+                // No byte-order flag: Quartz's default ordering is big-endian,
+                // which is what the removed kCGBitmapByteOrder32Big macro
+                // spelled (macros do not cross into the Kotlin bindings).
+                bitmapInfo = kCGImageAlphaPremultipliedLast.value,
             )
         } ?: return null
 
@@ -104,8 +108,7 @@ internal class IosImageCodec : ImageCodec {
                 bitsPerComponent = BITS_PER_COMPONENT,
                 bytesPerRow = (width * RGBA_PIXEL_BYTES).toULong(),
                 space = CGColorSpaceCreateDeviceRGB(),
-                bitmapInfo =
-                    kCGImageAlphaPremultipliedLast.value or kCGBitmapByteOrder32Big.value,
+                bitmapInfo = kCGImageAlphaPremultipliedLast.value,
             )
         } ?: return null
         val cgImage = CGBitmapContextCreateImage(context) ?: return null
@@ -118,8 +121,6 @@ internal class IosImageCodec : ImageCodec {
     }
 
     private companion object {
-        const val RGB_CHANNELS = 3
-        const val RGBA_PIXEL_BYTES = 4
         val BITS_PER_COMPONENT: ULong = 8uL
         const val OPAQUE_ALPHA = 0xff.toByte()
     }

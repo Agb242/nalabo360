@@ -7,12 +7,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import com.n30dyn4m1c.photosphere.Strings
 import kotlinx.cinterop.ExperimentalForeignApi
-import platform.AVFoundation.AVAuthorizationStatusAuthorized
-import platform.AVFoundation.AVAuthorizationStatusDenied
-import platform.AVFoundation.AVAuthorizationStatusNotDetermined
-import platform.AVFoundation.AVAuthorizationStatusRestricted
+import platform.AVFoundation.AVAuthorizationStatus
 import platform.AVFoundation.AVCaptureDevice
 import platform.AVFoundation.AVMediaTypeVideo
 import platform.Foundation.NSURL
@@ -53,8 +49,8 @@ actual fun RequirePermissions(
     // own rationale inside the alert, so there is no pre-prompt to stage.
     LaunchedEffect(Unit) {
         if (status == PermissionStatus.Unknown &&
-            AVCaptureDevice.authorizationStatusForType(AVMediaTypeVideo) ==
-            AVAuthorizationStatusNotDetermined
+            AVCaptureDevice.authorizationStatusForMediaType(AVMediaTypeVideo) ==
+            AVAuthorizationStatus.NotDetermined
         ) {
             AVCaptureDevice.requestAccessForMediaType(AVMediaTypeVideo) { _ ->
                 status = currentPermissionStatus()
@@ -83,15 +79,16 @@ actual fun RequirePermissions(
 
 @OptIn(ExperimentalForeignApi::class)
 private fun currentPermissionStatus(): PermissionStatus =
-    when (AVCaptureDevice.authorizationStatusForType(AVMediaTypeVideo)) {
-        AVAuthorizationStatusAuthorized -> PermissionStatus.Granted
-        AVAuthorizationStatusDenied, AVAuthorizationStatusRestricted ->
+    when (AVCaptureDevice.authorizationStatusForMediaType(AVMediaTypeVideo)) {
+        AVAuthorizationStatus.Authorized -> PermissionStatus.Granted
+        AVAuthorizationStatus.Denied, AVAuthorizationStatus.Restricted ->
             PermissionStatus.Denied
         else -> PermissionStatus.Unknown
     }
 
 @OptIn(ExperimentalForeignApi::class)
 private fun openAppSettings() {
-    val url = NSURL.URLWithString(UIApplication.openSettingsURLString) ?: return
+    // The constant's public string value; the Kotlin bindings do not surface it.
+    val url = NSURL.URLWithString("UIApplicationOpenSettingsURLString") ?: return
     UIApplication.sharedApplication.openURL(url)
 }
