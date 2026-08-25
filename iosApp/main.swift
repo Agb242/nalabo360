@@ -14,7 +14,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
         let window = UIWindow(frame: UIScreen.main.bounds)
-        window.rootViewController = IosEntry.createRootViewController()
+        window.rootViewController = IosEntry.shared.createRootViewController()
         window.makeKeyAndVisible()
         self.window = window
         return true
