@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>Nalabo360</string>
+	<key>CFBundleExecutable</key>
+	<string>Nalabo360</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.n30dyn4m1c.nalabo360</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>Nalabo360</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<!-- Matches the guided capture: portrait, like the Android manifest. -->
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+	</array>
+	<!-- Empty dict = full-screen launch on devices that require one. -->
+	<key>UILaunchScreen</key>
+	<dict/>
+	<!-- Camera: the whole point of the app (guided sphere capture). -->
+	<key>NSCameraUsageDescription</key>
+	<string>Nalabo360 uses the camera to shoot the overlapping frames it stitches into a 360° panorama.</string>
+	<!-- Add-only Photos access: saving the stitched sphere. Reading your library is never requested. -->
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Nalabo360 saves the stitched 360° panorama to your photo library.</string>
+</dict>
+</plist>

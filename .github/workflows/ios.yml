@@ -1,0 +1,47 @@
+name: iOS
+
+# Produces an UNSIGNED .ipa with no Xcode project and no paid Apple Developer
+# account: the Kotlin Multiplatform framework is linked by Gradle, a one-file
+# Swift entry point is compiled against it, and the .app bundle is assembled
+# and ad-hoc signed by iosApp/build-ipa.sh. Install it for free (7-day
+# certificate) via Sideloadly or AltStore — see docs/installation-iphone-gratuit.md.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unsigned-ipa:
+    name: Framework + .ipa non signée
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # The script drives Gradle itself (linkReleaseFrameworkIosArm64), then
+      # compiles main.swift with swiftc, assembles Payload/Nalabo360.app and
+      # packs the unsigned .ipa.
+      - name: Build unsigned .ipa
+        run: bash iosApp/build-ipa.sh
+
+      - name: Upload unsigned .ipa
+        uses: actions/upload-artifact@v4
+        with:
+          name: nalabo360-unsigned-ipa
+          path: iosApp/build/Nalabo360-unsigned.ipa
+          if-no-files-found: error

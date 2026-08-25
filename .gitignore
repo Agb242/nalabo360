@@ -18,3 +18,11 @@ local.properties
 # time. Test builds are published as GitHub Release assets instead — see the
 # "Test builds" section of the README.
 *.apk
+
+# Kotlin Multiplatform build outputs: composeApp (Gradle) and the .ipa assembly
+# scratch space under iosApp (see iosApp/build-ipa.sh).
+composeApp/build/
+iosApp/build/
+
+# One-off local tooling (migration patch scripts, logcat dumps).
+.tools/
