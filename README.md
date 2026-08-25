@@ -3,8 +3,8 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Android](https://img.shields.io/badge/Platform-Android-green.svg)](https://www.android.com/)
 [![Kotlin](https://img.shields.io/badge/Language-Kotlin-blue.svg)](https://kotlinlang.org/)
-[![iOS CI](https://github.com/n30dyn4m1c/360-photo-app/actions/workflows/ios.yml/badge.svg)](https://github.com/n30dyn4m1c/360-photo-app/actions/workflows/ios.yml)
-[![Android CI](https://github.com/n30dyn4m1c/360-photo-app/actions/workflows/android.yml/badge.svg)](https://github.com/n30dyn4m1c/360-photo-app/actions/workflows/android.yml)
+[![iOS CI](https://github.com/Agb242/nalabo360/actions/workflows/ios.yml/badge.svg)](https://github.com/Agb242/nalabo360/actions/workflows/ios.yml)
+[![Android CI](https://github.com/Agb242/nalabo360/actions/workflows/android.yml/badge.svg)](https://github.com/Agb242/nalabo360/actions/workflows/android.yml)
 
 **Guided capture and stitching of 360° photo spheres — one Kotlin Multiplatform codebase running on Android and iOS.**
 
@@ -730,7 +730,7 @@ that rode on it — the stitcher is pure shared Kotlin placing frames from their
 measured poses (see [Stitching](#stitching)).
 
 What is still outstanding is tracked in
-[the issue tracker](https://github.com/n30dyn4m1c/360-photo-app/issues). The
+[the issue tracker](https://github.com/Agb242/nalabo360/issues). The
 larger items at the time of writing: guided capture cannot be driven without
 sight, the result screen previews the sphere flat rather than as a pannable
 view, there are no instrumented UI tests, the strings are English-only, and the
