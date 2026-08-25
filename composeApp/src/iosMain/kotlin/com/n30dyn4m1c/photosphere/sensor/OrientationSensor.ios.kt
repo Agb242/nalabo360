@@ -6,12 +6,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.remember
 import com.n30dyn4m1c.photosphere.util.KLog
+import kotlinx.cinterop.useContents
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import platform.CoreMotion.CMAttitudeReferenceFrameXMagneticNorthZVertical
 import platform.CoreMotion.CMDeviceMotion
-import platform.CoreMotion.CMMagneticFieldCalibrationAccuracyCalibrationWeak
 import platform.CoreMotion.CMMagneticFieldCalibrationAccuracyUncalibrated
 import platform.CoreMotion.CMMotionManager
 import platform.Foundation.NSOperationQueue
@@ -84,23 +83,17 @@ class IosOrientationSensor : OrientationSensor {
     }
 
     /**
-     * CoreMotion reports magnetic-field accuracy as −1..2 (uncalibrated..high);
-     * the shared [OrientationAccuracy.fromSensorAccuracy] reads Android's
-     * 0..3 scale — uncalibrated shifts down one step onto "unreliable".
+     * CoreMotion reports magnetic-field calibration; the shared
+     * [OrientationAccuracy.fromSensorAccuracy] reads Android's 0..3 scale.
+     * Only "uncalibrated" is reliably nameable across binding versions, so
+     * everything calibrated maps onto the two upper steps.
      */
     private fun accuracyOf(motion: CMDeviceMotion): OrientationAccuracy =
         OrientationAccuracy.fromSensorAccuracy(
-            magneticAccuracyToSensorAccuracy(motion.magneticField.accuracy),
+            motion.magneticField.useContents {
+                if (accuracy == CMMagneticFieldCalibrationAccuracyUncalibrated) 0 else 2
+            },
         )
-
-    /** Maps CoreMotion's −1..1 calibration onto Android's 0..3 sensor scale. */
-    private fun magneticAccuracyToSensorAccuracy(
-        accuracy: CMMagneticFieldCalibrationAccuracy,
-    ): Int = when (accuracy) {
-        CMMagneticFieldCalibrationAccuracyUncalibrated -> 0
-        CMMagneticFieldCalibrationAccuracyCalibrationWeak -> 1
-        else -> 2
-    }
 
     private companion object {
         const val NANOS_PER_SECOND = 1_000_000_000.0

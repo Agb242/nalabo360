@@ -56,7 +56,8 @@ import com.n30dyn4m1c.photosphere.stitching.platformImageCodec
 import com.n30dyn4m1c.photosphere.ui.theme.PillShape
 import com.n30dyn4m1c.photosphere.util.KLog
 import kotlinx.cinterop.ExperimentalForeignApi
-import kotlinx.cinterop.toByteArray
+import kotlinx.cinterop.addressOf
+import kotlinx.cinterop.usePinned
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -71,6 +72,7 @@ import platform.Foundation.NSDate
 import platform.Foundation.NSDateFormatter
 import platform.Foundation.NSLocale
 import platform.Foundation.NSTemporaryDirectory
+import platform.posix.memcpy
 
 private const val TAG = "SphereCaptureScreen"
 
@@ -371,8 +373,7 @@ data class CapturedFrame(
     val rollDegrees: Float,
 )
 
-/** `yyyyMMdd_HHmmss_SSS` — same convention, same sort order as Android. */
-private fun newSessionId(): String {
+/** `yyyyMMdd_HHmmss_SSS` — same convention, same sort order as Android. */private fun newSessionId(): String {
     val formatter = NSDateFormatter().apply {
         dateFormat = "yyyyMMdd_HHmmss_SSS"
         locale = NSLocale("en_US_POSIX")
@@ -434,3 +435,13 @@ private fun writeStitchedSphere(image: RgbImage): StitchedSphere {
 
 private fun gpanoFor(image: RgbImage): GPanoMetadata =
     GPanoMetadata.forFullPano(image.width, image.height)
+
+/** Copies an `NSData` into a Kotlin array — the bridge hands out a pointer. */
+@OptIn(ExperimentalForeignApi::class)
+private fun NSData.toByteArray(): ByteArray {
+    val result = ByteArray(length.toInt())
+    result.usePinned { pinned ->
+        memcpy(pinned.addressOf(0), this@toByteArray.bytes, length)
+    }
+    return result
+}
