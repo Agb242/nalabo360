@@ -1,18 +1,27 @@
-# Photo Sphere
+# Nalabo360
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Android](https://img.shields.io/badge/Platform-Android-green.svg)](https://www.android.com/)
 [![Kotlin](https://img.shields.io/badge/Language-Kotlin-blue.svg)](https://kotlinlang.org/)
-[![CI](https://github.com/n30dyn4m1c/360-photo-app/actions/workflows/android.yml/badge.svg)](https://github.com/n30dyn4m1c/360-photo-app/actions/workflows/android.yml)
+[![iOS CI](https://github.com/n30dyn4m1c/360-photo-app/actions/workflows/ios.yml/badge.svg)](https://github.com/n30dyn4m1c/360-photo-app/actions/workflows/ios.yml)
+[![Android CI](https://github.com/n30dyn4m1c/360-photo-app/actions/workflows/android.yml/badge.svg)](https://github.com/n30dyn4m1c/360-photo-app/actions/workflows/android.yml)
 
-**Android app for guided capture and stitching of 360° photo spheres.**
+**Guided capture and stitching of 360° photo spheres — one Kotlin Multiplatform codebase running on Android and iOS.**
 
-The app covers **guided capture** — a CameraX viewfinder with a target alignment
-overlay that walks the user around the sphere and fires the shutter by itself
-whenever the camera settles on the next frame — **stitching**: OpenCV joins the
-captured frames into a 2:1 equirectangular image — and **publishing**: GPano XMP
-metadata is injected so viewers open the result as a pannable 360 photo, and a
-result screen offers it to the gallery and the share sheet.
+The app covers **guided capture** — a viewfinder with a target alignment overlay
+that walks the user around the sphere and fires the shutter by itself whenever
+the camera settles on the next frame — **stitching**: a pure-Kotlin stitcher
+joins the captured frames into a 2:1 equirectangular image — and
+**publishing**: GPano XMP metadata is injected so viewers open the result as a
+pannable 360 photo, and a result screen offers it to the gallery and the share
+sheet.
+
+Everything above runs from one shared source set
+(`composeApp/src/commonMain`). Android ships it inside an APK with CameraX
+behind the viewfinder; iOS compiles it into `Nalabo360Kit.framework`, wrapped
+by a one-file Swift host that CI assembles into an unsigned `.ipa`, installable
+for free via Sideloadly or AltStore — no paid Apple Developer account (see
+[`docs/installation-iphone-gratuit.md`](docs/installation-iphone-gratuit.md)).
 
 ## Requirements
 
@@ -24,6 +33,7 @@ result screen offers it to the gallery and the share sheet.
 | JDK | 17 |
 | compileSdk / targetSdk | 35 |
 | minSdk | 26 |
+| Xcode + macOS | iOS builds only (`iosApp/build-ipa.sh`, or the CI runner) |
 
 `minSdk` is 26 so the project can rely on adaptive launcher icons and modern
 camera2 behaviour without legacy fallbacks. CameraX itself supports API 21+, so
@@ -39,21 +49,18 @@ let it sync, and it writes `local.properties` for you. From the command line:
 # Point the build at your SDK (or let Android Studio create this file).
 echo "sdk.dir=$ANDROID_HOME" > local.properties
 
-./gradlew :app:assembleDebug
+./gradlew :composeApp:assembleDebug
 ```
 
 `local.properties` is machine-specific and git-ignored — it is the one file you
 must create yourself before a fresh clone will build.
 
-The ABI split in `app/build.gradle.kts` produces one APK per ABI
-(`arm64-v8a`, `armeabi-v7a`, `x86_64`) instead of a single universal one,
-because the OpenCV AAR carries native libraries for every ABI. They land in
-`app/build/outputs/apk/debug/`. Because the split makes several APKs out of one
-variant, there is no per-ABI install task — install to a connected device with
+The build produces one universal APK (~20 MB — the OpenCV AAR that used to
+force per-ABI splits is gone from the dependency graph) at
+`composeApp/build/outputs/apk/debug/`. Install to a connected device with
 
 ```bash
-./gradlew :app:installDebug          # picks the APK matching the device
-adb install -r app/build/outputs/apk/debug/app-arm64-v8a-debug.apk   # or by hand
+./gradlew :composeApp:installDebug    # or: adb install -r composeApp-debug.apk
 ```
 
 Debug builds are signed with the local debug keystore and carry the
@@ -61,25 +68,31 @@ Debug builds are signed with the local debug keystore and carry the
 install. `assembleRelease` produces an **unsigned** APK — add a `signingConfigs`
 block with your own keystore before using it for anything installable.
 
-### Without a local SDK
+### Without a local toolchain
 
-`.github/workflows/android.yml` runs the unit tests and assembles the debug
-APKs on every push, and uploads them as a workflow artifact
-(`photosphere-debug-apks`). Download it from the run's summary page, unzip, and
-`adb install` the APK for your device's ABI — no local toolchain needed. The
-workflow also runs on demand from the Actions tab.
+CI publishes ready-to-install artifacts on every push:
+
+- **`.github/workflows/android.yml`** runs the shared test suite and assembles
+  the debug APK, uploaded as the `nalabo360-debug-apk` artifact — download,
+  unzip, `adb install`, no local SDK needed.
+- **`.github/workflows/ios.yml`** builds the unsigned `.ipa` on a macOS runner
+  (`nalabo360-unsigned-ipa`). It installs for free through Sideloadly or
+  AltStore; the whole procedure lives in
+  [`docs/installation-iphone-gratuit.md`](docs/installation-iphone-gratuit.md).
+
+Both workflows also run on demand from the Actions tab.
 
 ## Test
 
 ```bash
-./gradlew :app:testDebugUnitTest   # local JVM tests, no device
-./gradlew :app:lintDebug           # Android lint
+./gradlew :composeApp:jvmTest      # the shared suite, on the desktop JVM — JDK only
+./gradlew :composeApp:lintDebug    # Android lint
 ```
 
 The unit tests cover the parts of the pipeline that are pure Kotlin: the sphere
 target plan, the projection maths, the alignment gate, the equirectangular fit,
 the stitch status mapping and the GPano XMP splice. Everything that needs real
-hardware — the camera, the rotation vector sensor, OpenCV's native stitch — is
+hardware — the camera, the rotation vector sensor, the capture loop — is
 verified on a device. The **Orientation debug** button in the top-right of debug
 builds exists for exactly that: it puts the live sensor readout on screen so a
 leaked or stopped listener is visible immediately.
@@ -93,56 +106,23 @@ physical device with a gyroscope.
 
 Versions live in [`gradle/libs.versions.toml`](gradle/libs.versions.toml).
 
-- **Jetpack Compose + Material 3** — `androidx.compose:compose-bom`,
-  `material3`, `activity-compose`, `lifecycle-runtime-compose`
-- **CameraX** — `camera-core`, `camera-camera2`, `camera-lifecycle`,
-  `camera-view` (all pinned to one version; mixing versions breaks binding)
-- **ExifInterface** — `androidx.exifinterface:exifinterface`
-- **OpenCV** — `org.opencv:opencv` (see below)
+- **Compose Multiplatform + Material 3** — runtime, foundation, material3,
+  animation, material-icons, ui: one shared UI for every target
+- **Kotlinx coroutines / datetime / okio** — concurrency, timestamps and file
+  I/O through multiplatform APIs
+- **CameraX** *(Android only)* — `camera-core`, `camera-camera2`,
+  `camera-lifecycle`, `camera-view` (all pinned to one version; mixing
+  versions breaks binding)
+- **ExifInterface** *(Android only)* — `androidx.exifinterface:exifinterface`
 
-### OpenCV
-
-**Option A — Maven artifact (what this project uses).**
-
-OpenCV has published its official Android SDK to Maven Central since 4.9.0, so
-nothing needs to be downloaded by hand:
-
-```kotlin
-implementation(libs.opencv)   // org.opencv:opencv:4.12.0
-```
-
-Note the coordinates: the group is `org.opencv` and the artifact is `opencv`
-(not `opencv-android`, which is an unofficial mirror). Note also what is *not*
-in it: there is no `org.opencv.stitching` — see
-[Stitching](#stitching) for what this project does instead. The AAR is ~120 MB
-because it bundles native libraries for all four ABIs — the ABI split above
-keeps the installed APK closer to ~30 MB.
-
-**Option B — local SDK module.**
-
-Use this if you need a custom OpenCV build (extra contrib modules, a smaller
-build with only `stitching` and `features2d`, or a version not on Maven).
-
-1. Download the Android SDK from <https://opencv.org/releases/> and unpack it to
-   `third_party/opencv-android-sdk/`.
-2. Uncomment the two `include`/`projectDir` lines at the bottom of
-   [`settings.gradle.kts`](settings.gradle.kts).
-3. In `app/build.gradle.kts`, replace `implementation(libs.opencv)` with
-   `implementation(project(":opencv"))`.
-4. The bundled SDK module often pins an old `compileSdk`/AGP combination. If the
-   sync fails, edit `third_party/opencv-android-sdk/sdk/build.gradle` to match
-   the values in `app/build.gradle.kts`.
-
-Either way, the native library is loaded once in
-[`PhotoSphereApplication`](app/src/main/java/com/n30dyn4m1c/photosphere/PhotoSphereApplication.kt)
-via `OpenCVLoader.initLocal()`. The old "OpenCV Manager" APK is not involved.
-`proguard-rules.pro` keeps `org.opencv.**` so release builds survive the JNI
-lookups.
+There is no native vision library any more: the entire stitching pipeline is
+pure shared Kotlin (see [Stitching](#stitching)), which is what makes the iOS
+target possible at all.
 
 ## Permissions
 
 Declared in
-[`AndroidManifest.xml`](app/src/main/AndroidManifest.xml):
+[`AndroidManifest.xml`](composeApp/src/androidMain/AndroidManifest.xml):
 
 | Permission | Type | Why |
 | --- | --- | --- |
@@ -167,9 +147,12 @@ either.
 
 ### Runtime handling
 
-`RequirePermissions` in
-[`MainActivity.kt`](app/src/main/java/com/n30dyn4m1c/photosphere/MainActivity.kt)
-gates the capture UI. It:
+`RequirePermissions` — declared once in the shared
+[`ui/AppRoot.kt`](composeApp/src/commonMain/kotlin/com/n30dyn4m1c/photosphere/ui/AppRoot.kt),
+implemented per platform (an Android actual beside
+[`MainActivity`](composeApp/src/androidMain/kotlin/com/n30dyn4m1c/photosphere/MainActivity.kt),
+an AVFoundation authorization check on iOS) — gates the capture UI. On Android
+it:
 
 - requests the set once on first composition,
 - distinguishes a plain denial (shows a rationale + retry) from
@@ -195,39 +178,30 @@ system will no longer surface a dialog for earns that trip.
 ## Project layout
 
 ```
-app/src/main/java/com/n30dyn4m1c/photosphere/
-├── MainActivity.kt              # entry point + runtime permission gate
-├── PhotoSphereApplication.kt    # OpenCV native init
-├── camera/
-│   ├── PhotoSphereCameraScreen.kt # CameraX preview + the capture loop
-│   ├── TargetOverlay.kt         # reticle, target markers, dwell arc
-│   ├── SphereTarget.kt          # the sphere's target list
-│   ├── SphereProjection.kt      # attitude + target -> screen position
-│   ├── AlignmentGate.kt         # 2° / 300 ms shutter rule
-│   ├── CameraOptics.kt          # field of view from the camera's optics
-│   └── CaptureFeedback.kt       # shutter sound + haptic tick
-├── sensor/
-│   ├── OrientationTracker.kt    # rotation vector -> yaw/pitch/roll StateFlow
-│   ├── OrientationState.kt      # lifecycle-aware Compose bindings
-│   └── OrientationDebugScreen.kt# live readout for on-device verification
-├── stitching/
-│   ├── PhotoSphereStitcher.kt   # the stitch: read, render, statuses, progress
-│   ├── SphericalGeometry.kt     # camera basis, canvas mapping, frame footprints
-│   ├── MultibandBlender.kt      # Laplacian-pyramid blend: levels, reconstruction
-│   └── EquirectangularRenderer.kt # projecting frames onto the sphere, blending
-├── metadata/
-│   └── GPanoXmpInjector.kt      # GPano XMP into the JPEG header, no re-encode
-├── result/
-│   └── PanoramaResultScreen.kt  # preview, export to gallery, share, start over
-├── storage/
-│   ├── SphereImageStore.kt      # cache sessions, the finished sphere, EXIF
-│   ├── MediaExporter.kt         # MediaStore write into Pictures/360Panoramas
-│   └── ImageBufferManager.kt    # this run's frames + their capture attitude
-└── ui/theme/
-    ├── Color.kt                 # the one palette: signals, glass, surfaces
-    ├── Theme.kt                 # the scheme — dark always, no dynamic colour
-    ├── Type.kt                  # the type scale
-    └── Shape.kt                 # the corner-radius ladder + PillShape
+composeApp/src/                                  # one module, four source sets
+├── commonMain/kotlin/com/n30dyn4m1c/photosphere/  # everything shared
+│   ├── AppRoot.kt, PlatformUi.kt, Strings.kt      # navigation, expect surfaces,
+│   │                                              #   the one string table
+│   ├── camera/        # target plan, projection, alignment gate, capture
+│   │                  #   profiles, SphereCaptureScreen (expect)
+│   ├── sensor/        # OrientationSensor contract + fusion maths
+│   ├── result/        # PanoramaResultScreen: preview, export, share, restart
+│   ├── stitching/     # the stitcher, pure Kotlin: renderer, multiband blender,
+│   │                  #   seam solver, lens model, pivot, exposure compensation
+│   ├── metadata/      # GPanoXmpInjector — XMP spliced into the JPEG header
+│   ├── storage/       # SphereCache — session directories
+│   └── ui/theme/      # Color, Theme, Type, Shape
+├── androidMain/kotlin/…               # MainActivity, CameraX capture loop +
+│                                      #   auto-shutter, orientation tracker,
+│                                      #   MediaStore export, EXIF stamping
+├── iosMain/kotlin/…                   # AVFoundation capture, CoreMotion
+│                                      #   attitude, Photos export, MainViewController
+├── jvmMain/kotlin/…                   # desktop stubs so the suite runs anywhere
+└── commonTest/kotlin/…                # the shared test suite (:composeApp:jvmTest)
+
+iosApp/                               # Swift host, Info.plist, build-ipa.sh
+docs/installation-iphone-gratuit.md   # free iPhone installs (Sideloadly/AltStore)
+.github/workflows/                    # android.yml (APK) · ios.yml (unsigned .ipa)
 ```
 
 ## Interface
@@ -235,7 +209,7 @@ app/src/main/java/com/n30dyn4m1c/photosphere/
 Everything the user looks at sits on top of either a live viewfinder or a
 finished photograph, and that one fact settles most of the design decisions.
 The palette, type scale and shape ladder live in
-[`ui/theme/`](app/src/main/java/com/n30dyn4m1c/photosphere/ui/theme/) and are
+[`ui/theme/`](composeApp/src/commonMain/kotlin/com/n30dyn4m1c/photosphere/ui/theme/) and are
 defined once each — the two signal colours in particular were previously hex
 literals repeated across three files, which is how a design drifts.
 
@@ -304,7 +278,7 @@ sight; see the open issues.
 
 ## Device orientation
 
-[`OrientationTracker`](app/src/main/java/com/n30dyn4m1c/photosphere/sensor/OrientationTracker.kt)
+[`OrientationTracker`](composeApp/src/androidMain/kotlin/com/n30dyn4m1c/photosphere/sensor/OrientationTracker.kt)
 listens to `TYPE_ROTATION_VECTOR` — the *fused* sensor, so the attitude is
 absolute, north-referenced and drift-free — and publishes it as a
 `StateFlow<OrientationData>` of yaw, pitch and roll in degrees.
@@ -325,8 +299,8 @@ describe **where the rear camera points**, not the screen:
    attitude — turning a landscape phone "up" reads as pitch, never as roll.
 
 This extraction is the *inverse* of the axis construction
-[`SphereProjection`](app/src/main/java/com/n30dyn4m1c/photosphere/camera/SphereProjection.kt)
-and [`CameraBasis`](app/src/main/java/com/n30dyn4m1c/photosphere/stitching/SphericalGeometry.kt)
+[`SphereProjection`](composeApp/src/commonMain/kotlin/com/n30dyn4m1c/photosphere/camera/SphereProjection.kt)
+and [`CameraBasis`](composeApp/src/commonMain/kotlin/com/n30dyn4m1c/photosphere/stitching/SphericalGeometry.kt)
 build their camera bases with, so a yaw/pitch/roll handed to the stitcher places
 a frame exactly where the sensor held the camera. (It used to go through a
 `remapCoordinateSystem` + `getOrientation` shortcut that reported a level pan as
@@ -367,12 +341,12 @@ strips it from release builds.
 
 ## Guided capture
 
-[`PhotoSphereCameraScreen`](app/src/main/java/com/n30dyn4m1c/photosphere/camera/PhotoSphereCameraScreen.kt)
+[`PhotoSphereCameraScreen`](composeApp/src/androidMain/kotlin/com/n30dyn4m1c/photosphere/camera/PhotoSphereCameraScreen.kt)
 binds a CameraX `Preview` and `ImageCapture` to the activity lifecycle and runs
 the loop that turns device attitude into frames. The user never presses a
 shutter: they move the reticle onto the next marker and hold.
 
-**The target list.** [`SphereTargetPlan`](app/src/main/java/com/n30dyn4m1c/photosphere/camera/SphereTarget.kt)
+**The target list.** [`SphereTargetPlan`](composeApp/src/commonMain/kotlin/com/n30dyn4m1c/photosphere/camera/SphereTarget.kt)
 lays its rings out to match the device's lens. The yaw gap on the equator is the
 horizontal field of view minus a 35% overlap target, so a wide-angle phone takes
 fewer, larger frames and a narrow one takes more, smaller ones — every frame
@@ -397,28 +371,28 @@ targets too far apart, and the overlap is the first thing to be eaten. Spending
 a few extra frames is the cheaper mistake.
 
 **One plan, inferred coverage.** A toggle chooses how much of the sphere the
-plan walks: [`SphereCaptureScope.Ring`](app/src/main/java/com/n30dyn4m1c/photosphere/camera/SphereTarget.kt)
+plan walks: [`SphereCaptureScope.Ring`](composeApp/src/commonMain/kotlin/com/n30dyn4m1c/photosphere/camera/SphereTarget.kt)
 lays out just the horizon — a regular pano that goes all the way around, like a
-ring — while [`SphereCaptureScope.Sphere`](app/src/main/java/com/n30dyn4m1c/photosphere/camera/SphereTarget.kt)
+ring — while [`SphereCaptureScope.Sphere`](composeApp/src/commonMain/kotlin/com/n30dyn4m1c/photosphere/camera/SphereTarget.kt)
 adds rings out to both poles. Either way coverage is inferred from the frames as
 they land, and the run can be stitched at any point — three overlapping frames
 are already a panorama. Stop early for a partial capture (black where it was
 never shot), or walk the whole plan for a full one. The HUD counts bands so "the
 horizon is closed" is a visible moment rather than a guess.
 
-**Where a marker goes on screen.** [`SphereProjection`](app/src/main/java/com/n30dyn4m1c/photosphere/camera/SphereProjection.kt)
+**Where a marker goes on screen.** [`SphereProjection`](composeApp/src/commonMain/kotlin/com/n30dyn4m1c/photosphere/camera/SphereProjection.kt)
 rotates a target's direction out of the world frame into the camera's own frame
 and divides through by depth — the same rectilinear projection the lens
 performs, so a marker lands on the pixel its target will actually occupy. The
 focal length comes from the camera's reported optics
-([`CameraOptics`](app/src/main/java/com/n30dyn4m1c/photosphere/camera/CameraOptics.kt)),
+([`CameraOptics`](composeApp/src/androidMain/kotlin/com/n30dyn4m1c/photosphere/camera/CameraOptics.android.kt)),
 preferring the device's own intrinsic calibration and falling back to typical
 phone values if the camera will not describe itself. Roll is included, so
 tilting the phone turns the markers with the scene; it is deliberately excluded
 from the *distance* measure, since turning the phone in its own plane does not
 change where it is aimed.
 
-**The overlay, Photo Sphere style.** [`TargetOverlay`](app/src/main/java/com/n30dyn4m1c/photosphere/camera/TargetOverlay.kt)
+**The overlay, Photo Sphere style.** [`TargetOverlay`](composeApp/src/androidMain/kotlin/com/n30dyn4m1c/photosphere/camera/TargetOverlay.kt)
 draws the reticle the way Google Camera's Photo Sphere and Street View do: a
 large ring fixed at the centre of the viewfinder, sized to the display rather
 than a fine crosshair, that warms from white toward green as the aim closes on
@@ -428,7 +402,7 @@ cover", a filled green one is "done", and the live target pulses with a dashed
 guide line back to the reticle — collapsing to a chevron on the border when it
 is off-screen, so the user always knows which way to turn.
 
-**The trigger.** [`AlignmentGate`](app/src/main/java/com/n30dyn4m1c/photosphere/camera/AlignmentGate.kt)
+**The trigger.** [`AlignmentGate`](composeApp/src/commonMain/kotlin/com/n30dyn4m1c/photosphere/camera/AlignmentGate.kt)
 fires once the aim has been within **2°** of the active target continuously for
 **300 ms**. The dwell is what keeps a frame from being taken mid-swing: at a
 normal pan rate the reticle crosses a 2° window in far less than 300 ms, so only
@@ -458,7 +432,7 @@ the scene, is dropped with the **undo** button in the top-left corner (the
 Street View camera's control): the last frame is deleted and its target becomes
 the active one again, so it can simply be re-shot.
 
-**Device tuning.** [`SphereDeviceProfile`](app/src/main/java/com/n30dyn4m1c/photosphere/camera/SphereDeviceProfile.kt)
+**Device tuning.** [`SphereDeviceProfile`](composeApp/src/commonMain/kotlin/com/n30dyn4m1c/photosphere/camera/SphereDeviceProfile.kt)
 is where a specific phone is tuned, decided once per device. On a Samsung
 Galaxy S23 it is tuned for sharpness:
 
@@ -488,7 +462,7 @@ this one number, and describing the ultrawide while streaming the main lens
 spaces every target roughly twice too far apart — frames that do not overlap at
 all, and a run that fails at the end with nothing to show for it. Three things
 guard against it, all in
-[`CameraOptics`](app/src/main/java/com/n30dyn4m1c/photosphere/camera/CameraOptics.kt):
+[`CameraOptics`](composeApp/src/androidMain/kotlin/com/n30dyn4m1c/photosphere/camera/CameraOptics.android.kt):
 
 - **Two independent estimates, reconciled.** One from `LENS_INTRINSIC_CALIBRATION`
   against the *pre-correction* active array, one from physical sensor size over
@@ -510,11 +484,11 @@ guard against it, all in
 
 The geometry, the target plan and the trigger rule are pure Kotlin, and are
 covered by local unit tests in
-[`app/src/test/java/com/n30dyn4m1c/photosphere/camera/`](app/src/test/java/com/n30dyn4m1c/photosphere/camera).
+[`composeApp/src/commonTest/kotlin/com/n30dyn4m1c/photosphere/camera/`](composeApp/src/commonTest/kotlin/com/n30dyn4m1c/photosphere/camera).
 
 ## Stitching
 
-**The buffer.** [`ImageBufferManager`](app/src/main/java/com/n30dyn4m1c/photosphere/storage/ImageBufferManager.kt)
+**The buffer.** [`ImageBufferManager`](composeApp/src/androidMain/kotlin/com/n30dyn4m1c/photosphere/storage/ImageBufferManager.kt)
 is what capture and stitching pass frames through. Each entry is a file in the
 session's cache directory plus the yaw/pitch/roll the device held when it was
 shot; the pixels stay on disk, because a sphere held as decoded bitmaps is
@@ -528,35 +502,16 @@ bindings for core, imgproc, features2d, calib3d and the rest, but no
 `org.opencv.stitching` package — and `libopencv_java4.so` contains none of the
 pipeline's native symbols either, so a JNI shim would not link. Independently
 built AARs are the same. `cv::Stitcher` is, in practice, a desktop API, and the
-local OpenCV SDK ("Option B" above) does not change that.
+local OpenCV SDK does not change that.
 
-**What this does instead.** Guided capture already knows where the camera was
+**What this is instead.** Guided capture already knows where the camera was
 pointing for every frame — the shutter only fires when the device is held on a
 known target — which turns the expensive half of stitching, solving for each
 camera's rotation, into something already measured. What is left is a
-reprojection, but the measured poses are not the last word:
-
-- [`PoseRefiner`](app/src/main/java/com/n30dyn4m1c/photosphere/stitching/PoseRefiner.kt)
-  matches ORB features between every overlapping pair of frames, recovers the
-  *content-observed* relative rotation of each pair with a pure-rotation RANSAC,
-  and runs a Gauss–Seidel solve over the whole pose graph with the sensor
-  rotations as the starting guess. The result is a small per-frame correction
-  that sharpens the overlaps to what the pixels agree on. The sensor stays the
-  anchor: every edge is sanity-checked against the sensor-relative rotation it
-  should be near, and a frame whose content gives no reliable matches keeps its
-  measured pose, so a featureless sky or a blank wall degrades gracefully to the
-  orientation-driven stitch rather than a failed one.
-- The same matches also sharpen the *field of view*. A focal-length error pulls
-  every bearing radially about the optical axis, so the residual the rotations
-  leave behind carries a measure of it: a per-frame focal correction is solved
-  by least squares from the matched bearings (Brown & Lowe's step) and the
-  stitcher projects through the corrected focal lengths. Frame 0 is anchored —
-  the whole sphere can be uniformly scaled without changing any alignment, so
-  the absolute scale is only defined relative to the frame held still — and
-  corrections are clamped to ±15% and gated behind at least forty agreeing
-  correspondences, so a featureless run keeps the device's reported field of
-  view. The radial distortion is re-normalised against each corrected focal
-  length, so the lens stays the same physical lens at its new focal.
+reprojection. (An earlier iteration also refined poses and focal lengths from
+ORB feature matches on top of OpenCV; that stage did not survive the port to
+pure shared Kotlin — the sensor's fused attitude feeds the renderer directly
+now.) What the pipeline does carry through the model:
 - Which pairs count as overlapping is a *directional* test rather than a single
   distance threshold: the second frame's aim is projected into the first's
   camera frame and must land within one field of view on both axes. A portrait
@@ -564,7 +519,7 @@ reprojection, but the measured poses are not the last word:
   vertically but not at all horizontally — a distance-only rule would waste a
   match on them.
 - The lens's radial distortion is carried through the whole model. The camera's
-  `LENS_DISTORTION` coefficients ([`RadialDistortion`](app/src/main/java/com/n30dyn4m1c/photosphere/stitching/LensModel.kt))
+  `LENS_DISTORTION` coefficients ([`RadialDistortion`](composeApp/src/commonMain/kotlin/com/n30dyn4m1c/photosphere/stitching/LensModel.kt))
   describe how the lens bends the pinhole projection, so the renderer samples
   the pixel the lens really recorded and the footprint walks the true (distorted)
   border — frame edges, where seams live, land where they should instead of
@@ -575,11 +530,11 @@ reprojection, but the measured poses are not the last word:
   Reading one through the other's convention overstates `k1` by `(f / halfEdge)²`
   and `k3` by the sixth power of the same, which is a correction several times
   larger than the distortion it is meant to remove.
-- [`ExposureCompensation`](app/src/main/java/com/n30dyn4m1c/photosphere/stitching/ExposureCompensation.kt)
+- [`ExposureCompensation`](composeApp/src/commonMain/kotlin/com/n30dyn4m1c/photosphere/stitching/ExposureCompensation.kt)
   fits per-frame brightness gains against the overlap graph — a frame shot into
   the sun and the frame beside it recorded against it no longer meet at a
   brightness cliff inside the cross-fade.
-- [`PivotModel`](app/src/main/java/com/n30dyn4m1c/photosphere/stitching/PivotModel.kt)
+- [`PivotModel`](composeApp/src/commonMain/kotlin/com/n30dyn4m1c/photosphere/stitching/PivotModel.kt)
   accounts for the fact that nobody turns the phone around its own lens. A
   panorama assumes every frame was shot from one point; holding a phone up and
   swivelling your *body* puts the camera on the end of a lever a third of a
@@ -596,17 +551,15 @@ reprojection, but the measured poses are not the last word:
   the two lengths survives the subtraction, so neither has to be measured
   precisely — and because the lever points down the optical axis it cancels out
   of both lateral components, leaving the renderer's inner loop one subtraction
-  heavier and nothing else. `PoseRefiner` applies the same referral to every
-  feature bearing before matching, so the pure-rotation RANSAC is solving a
-  problem that is actually a pure rotation.
+  heavier and nothing else.
 
   The default lever arm is 0.35 m against a nominal 10 m scene. The scene
   distance is deliberately long rather than typical: over-correcting bends
   frames apart just as surely as parallax bends them together, and this takes
   most of the error out of a close scene while adding under a degree to a
-  distant one — comfortably inside what the refinement absorbs.
+  distant one.
 
-[`SphericalGeometry`](app/src/main/java/com/n30dyn4m1c/photosphere/stitching/SphericalGeometry.kt)
+[`SphericalGeometry`](composeApp/src/commonMain/kotlin/com/n30dyn4m1c/photosphere/stitching/SphericalGeometry.kt)
 holds the maths: a `CameraBasis` built from a frame's yaw/pitch/roll, the
 mapping between canvas pixels and directions on the sphere, and the *footprint* —
 the block of canvas a frame can reach. The footprint is found by walking the
@@ -616,13 +569,13 @@ handles the two cases that break a naive bounding box: a frame straddling the
 ±180° seam comes back as one unwrapped range, and a frame containing a pole opens
 out to the full width, because every longitude passes underneath it.
 
-[`EquirectangularRenderer`](app/src/main/java/com/n30dyn4m1c/photosphere/stitching/EquirectangularRenderer.kt)
+[`EquirectangularRenderer`](composeApp/src/commonMain/kotlin/com/n30dyn4m1c/photosphere/stitching/EquirectangularRenderer.kt)
 does the painting. Every output pixel is a direction; for each frame that
 direction is rotated into the frame's own axes and divided through by depth,
 which gives the pixel that looked at it (through the distortion model), and
 `Imgproc.remap` samples it. The exposure gains are applied before the blend, so
 they land inside it. Overlaps resolve to a multi-band (Laplacian pyramid)
-blend — see [`MultibandBlender`](app/src/main/java/com/n30dyn4m1c/photosphere/stitching/MultibandBlender.kt).
+blend — see [`MultibandBlender`](composeApp/src/commonMain/kotlin/com/n30dyn4m1c/photosphere/stitching/MultibandBlender.kt).
 Each frame and its feather mask are split into bands, and each band is
 cross-faded with a mask sized to the band: fine detail fades across a few
 pixels, broad illumination across the whole overlap, so a seam is faded at
@@ -631,7 +584,7 @@ pixel only one frame reached still comes out at full strength, because its
 mask divides back out.
 
 **Seam carving** is the alternative to the wide cross-fade, toggled by the
-debug **Seam** button next to Dist/Refine. [`SeamFinder`](app/src/main/java/com/n30dyn4m1c/photosphere/stitching/SeamFinder.kt)
+debug **Seam** button next to Dist. [`SeamFinder`](composeApp/src/commonMain/kotlin/com/n30dyn4m1c/photosphere/stitching/SeamFinder.kt)
 asks which single frame should paint each pixel, instead of letting every
 overlapping frame contribute, and the renderer then paints near-hard selections
 that fade only a few pixels across each cut — the sharpness a cross-fade
@@ -648,14 +601,14 @@ spends. The question is posed as an energy over the overlap:
   expansion move is submodular and its exact min-cut can never raise the
   energy.
 
-The energy is minimized with α-expansion — [`SeamSolver`](app/src/main/java/com/n30dyn4m1c/photosphere/stitching/SeamSolver.kt)
+The energy is minimized with α-expansion — [`SeamSolver`](composeApp/src/commonMain/kotlin/com/n30dyn4m1c/photosphere/stitching/SeamSolver.kt)
 — where each label in turn offers every pixel "keep your frame or switch to
 this one", and each binary subproblem is an s-t min-cut over the pixel grid
 (Dinic's max-flow). The whole solver is pure Kotlin, exercised on the JVM
 against an exhaustive search on tiny grids. The seam is decided at a reduced
 resolution (~512 columns across the canvas) because a cut only needs locating
 to within a few output pixels, and the graph-cut's cost scales with that grid
-rather than with the full canvas; [`SeamFeather`](app/src/main/java/com/n30dyn4m1c/photosphere/stitching/SeamWeights.kt)
+rather than with the full canvas; [`SeamFeather`](composeApp/src/commonMain/kotlin/com/n30dyn4m1c/photosphere/stitching/SeamWeights.kt)
 then turns the label map into the narrow cross-fade the renderer looks up — the
 winner holds weight 1 everywhere, and the loser's contribution ramps in from
 half on the boundary to nothing a few pixels away. The multi-band machinery is
@@ -666,10 +619,9 @@ carving instead of blending.
 The result is equirectangular *by construction* rather than by cropping
 something else into shape: a pixel's row is its latitude, so an incomplete sphere
 is black exactly where it was not shot, at the right elevation. The accuracy
-ceiling is how much of the residual pose error the content can resolve — the
-rotation vector sensor is fused and drift-free but not perfect, and the feature
-refinement pulls the overlaps back into agreement instead of leaving soft
-doubling.
+ceiling is the orientation sensor itself: the fused attitude is drift-free but
+not perfect, and residual error shows up as soft doubling in the overlaps
+rather than as a failed stitch.
 
 **Memory.** A 4096-wide canvas needs 100 MB of float accumulator if it is held
 at once, which is exactly the allocation that ends a stitch on a mid-range
@@ -692,7 +644,7 @@ all projected through the wrong axis.
 
 Failures come back as a failed `Result` carrying a `StitchException` with a
 `StitchStatus`: too little of the sphere covered, a frame that would not decode,
-the native library missing, out of memory.
+out of memory.
 
 **In the UI.** A **Finish & stitch** button appears in
 `PhotoSphereCameraScreen` once three frames are buffered, and a modal with a
@@ -712,7 +664,7 @@ sphere was never shot, at the right elevation.
 
 ## The finished sphere
 
-**GPano metadata.** [`GPanoXmpInjector`](app/src/main/java/com/n30dyn4m1c/photosphere/metadata/GPanoXmpInjector.kt)
+**GPano metadata.** [`GPanoXmpInjector`](composeApp/src/commonMain/kotlin/com/n30dyn4m1c/photosphere/metadata/GPanoXmpInjector.kt)
 is what makes the output a *360 photo* rather than a wide picture: Google
 Photos, Facebook and friends switch to a sphere viewer on an XMP packet in the
 `GPano` namespace, and `ExifInterface` writes EXIF only. It walks the JPEG's
@@ -724,10 +676,10 @@ generation of JPEG on the way in. Eight properties are written:
 `UsePanoramaViewer`, `ProjectionType`, `FullPano{Width,Height}Pixels` and the
 four `CroppedArea*` values, which cover the whole image because the renderer
 draws straight into a full 2:1 canvas and leaves what the capture never reached
-black. It is plain `java.io`, so it is covered by local unit tests that assert
-the image data comes out byte-identical.
+black. It is plain byte-level work on an okio `Path`, so it is covered by local unit
+tests that assert the image data comes out byte-identical.
 
-**The result screen.** [`PanoramaResultScreen`](app/src/main/java/com/n30dyn4m1c/photosphere/result/PanoramaResultScreen.kt)
+**The result screen.** [`PanoramaResultScreen`](composeApp/src/commonMain/kotlin/com/n30dyn4m1c/photosphere/result/PanoramaResultScreen.kt)
 shows the sphere flat — the black wedges at the poles are the parts the run
 never reached, and they are worth seeing before deciding to keep it — over three
 actions: **Export to gallery**, **Share**, and **New photo**. Nothing has been
@@ -743,7 +695,7 @@ several minutes of standing in one spot turning around, silently. Once the photo
 has been written to the gallery the question stops being worth asking and the
 prompt no longer appears.
 
-**Export.** [`MediaExporter`](app/src/main/java/com/n30dyn4m1c/photosphere/storage/MediaExporter.kt)
+**Export.** [`MediaExporter`](composeApp/src/androidMain/kotlin/com/n30dyn4m1c/photosphere/storage/MediaExporter.kt)
 copies the file into `Pictures/360Panoramas` through MediaStore. From API 29 the
 row is inserted with `IS_PENDING = 1`, the bytes are streamed into the URI
 MediaStore hands back, and `IS_PENDING` is cleared only once the copy finishes,
@@ -756,23 +708,26 @@ is a byte copy, not a re-encode, which is what keeps the GPano packet intact.
 **Share** sends the same JPEG through `Intent.ACTION_SEND`. The cache is
 private, and a `file://` URI would throw `FileUriExposedException` on anything
 since API 24, so it travels as a `content://` URI from the app's `FileProvider`
-(`res/xml/file_paths.xml` exposes `cacheDir/spheres/` and nothing else) with a
+(`androidMain/res/xml/file_paths.xml` exposes `cacheDir/spheres/` and nothing else) with a
 read grant attached.
 
 ## Status
 
-The pipeline features that were once listed here as outstanding have all
-landed:
+The codebase is now Kotlin Multiplatform: one shared source set builds the
+Android APK, the unsigned iOS `.ipa` (free install via Sideloadly/AltStore) and
+a desktop JVM target that runs the test suite anywhere. Pipeline features that
+were once listed here as outstanding have landed:
 
-- **Focal-length refinement** — the pose refinement solves a per-frame focal
-  correction from the matched bearings and the stitcher projects through it (see
-  [Stitching](#stitching)).
 - **Multi-band blending** — overlaps resolve to a Laplacian pyramid blend that
   fades fine detail over a few pixels and broad illumination over the whole
   overlap.
 - **Seam carving** — instead of blending every overlap, a graph-cut finds the
   assignment of each pixel to the frame that agrees best and cuts there, fading
   only a few pixels across it.
+
+Gone along the way: the OpenCV dependency and the ORB pose/focal refinement
+that rode on it — the stitcher is pure shared Kotlin placing frames from their
+measured poses (see [Stitching](#stitching)).
 
 What is still outstanding is tracked in
 [the issue tracker](https://github.com/n30dyn4m1c/360-photo-app/issues). The
@@ -783,14 +738,14 @@ activity's hard portrait lock is ignored from Android 16 onward.
 
 ## Test builds
 
-Debug APKs are published as
-[GitHub Release](https://github.com/n30dyn4m1c/360-photo-app/releases) assets
-rather than committed to the repository — a debug build of this app is ~43 MB,
-and committing one per rebuild grows the history by that much every time.
+Installable builds are published as workflow artifacts rather than committed to
+the repository — committing one per rebuild would grow the history by tens of
+megabytes every time. Grab `nalabo360-debug-apk` from the Android workflow or
+`nalabo360-unsigned-ipa` from the iOS one.
 
-To build your own, see [Build](#build); `./gradlew assembleDebug` writes one APK
-per ABI to `app/build/outputs/apk/debug/`. Take `app-arm64-v8a-debug.apk` for
-any modern phone.
+To build your own, see [Build](#build): `./gradlew :composeApp:assembleDebug`
+writes `composeApp-debug.apk`, and `iosApp/build-ipa.sh` packs the unsigned
+`.ipa` on a Mac.
 
 ## License
 
