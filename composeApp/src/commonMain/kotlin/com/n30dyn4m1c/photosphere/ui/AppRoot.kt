@@ -13,14 +13,17 @@ import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.PhotoCamera
+import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -35,6 +38,9 @@ import com.n30dyn4m1c.photosphere.camera.SphereCaptureScreen
 import com.n30dyn4m1c.photosphere.isDebugBuild
 import com.n30dyn4m1c.photosphere.result.PanoramaResultScreen
 import com.n30dyn4m1c.photosphere.sensor.OrientationDebugScreen
+import com.n30dyn4m1c.photosphere.settings.ReticleSettingsRepository
+import com.n30dyn4m1c.photosphere.settings.ReticleStyleHub
+import com.n30dyn4m1c.photosphere.settings.appDataDirectory
 import com.n30dyn4m1c.photosphere.storage.SphereCache
 import com.n30dyn4m1c.photosphere.storage.StitchedSphere
 import com.n30dyn4m1c.photosphere.ui.theme.PillShape
@@ -72,6 +78,14 @@ fun PhotoSphereApp(modifier: Modifier = Modifier) {
     // permission gate rather than behind it.
     var showOrientationDebug by rememberSaveable { mutableStateOf(false) }
 
+    // Settings ride above whichever screen is up; the reticle style they edit
+    // is process-wide, so capture picks changes up live.
+    var showSettings by rememberSaveable { mutableStateOf(false) }
+    val settingsRepository = remember { ReticleSettingsRepository(appDataDirectory()) }
+    LaunchedEffect(settingsRepository) {
+        ReticleStyleHub.update(settingsRepository.load())
+    }
+
     // Deliberately not `rememberSaveable`: after a process death or window
     // recreate the file may still be in the cache, but re-showing a stale result
     // would be worse than starting over.
@@ -86,6 +100,8 @@ fun PhotoSphereApp(modifier: Modifier = Modifier) {
 
     Box(modifier = modifier.fillMaxSize()) {
         when {
+            showSettings -> ReticleSettingsScreen(onBack = { showSettings = false })
+
             showOrientationDebug -> OrientationDebugScreen()
 
             else -> RequirePermissions(
@@ -103,14 +119,33 @@ fun PhotoSphereApp(modifier: Modifier = Modifier) {
             }
         }
 
+        // The settings entry point — the reticle is the one thing worth tuning
+        // for the light you are actually shooting in, and this is the only
+        // screen group there is to tune it from.
+        if (!showSettings) {
+            FilledTonalIconButton(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .systemBarsPadding()
+                    .padding(top = 12.dp, end = 12.dp),
+                onClick = { showSettings = true },
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.Settings,
+                    contentDescription = Strings.SETTINGS_TITLE,
+                )
+            }
+        }
+
         // Debug-only entry point. [isDebugBuild] is a release-time constant on
         // every target, so dead-code elimination drops this from release builds.
-        if (isDebugBuild) {
+        // Parked below the settings button so the two never trade places.
+        if (isDebugBuild && !showSettings) {
             FilledTonalButton(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
                     .systemBarsPadding()
-                    .padding(12.dp),
+                    .padding(top = 72.dp, end = 12.dp),
                 onClick = { showOrientationDebug = !showOrientationDebug },
             ) {
                 Text(
@@ -156,6 +191,10 @@ internal fun PermissionMessage(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center,
         ) {
+            // The brand, before the ask — this screen is the first thing a new
+            // user ever sees, so it is where the name goes.
+            NalaboWordmark(modifier = Modifier.padding(bottom = 28.dp))
+
             // A ring around the lens glyph, echoing the capture reticle the user
             // is about to spend the next few minutes aiming.
             Box(

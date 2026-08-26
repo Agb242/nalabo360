@@ -51,6 +51,8 @@ xcrun -sdk iphoneos swiftc \
 
 step "3/5 Assembling $APP_NAME.app"
 cp "$ROOT/iosApp/Info.plist" "$APP_DIR/Info.plist"
+cp "$ROOT/iosApp/AppIcon60x60@2x.png" "$APP_DIR/AppIcon60x60@2x.png"
+cp "$ROOT/iosApp/AppIcon60x60@3x.png" "$APP_DIR/AppIcon60x60@3x.png"
 cp -R "$FRAMEWORK" "$APP_DIR/Frameworks/"
 
 step "4/5 Ad-hoc signing (Sideloadly/AltStore replace every signature at install)"

@@ -23,6 +23,20 @@ import androidx.compose.ui.graphics.Color
  * of chrome happens to need one — that duplication is how a design drifts.
  */
 
+// --- Brand ----------------------------------------------------------------
+//
+// The Nalabo360 wordmark's two colours, sampled straight from the logo. These
+// are for brand moments — the wordmark, the launcher story, settings accents —
+// and deliberately never for capture signals, which keep their own palette
+// above: repainting "done" or "aim here" in brand colours would trade a
+// legible language for a consistent one.
+
+/** The deep teal-navy of the "Nalabo" lettering. */
+val BrandNavy = Color(0xFF0D252D)
+
+/** The teal of the "360" and the compass glyph, lifted for dark surfaces. */
+val BrandTeal = Color(0xFF2AA9A6)
+
 // --- Signal colours -------------------------------------------------------
 
 /** Aligned, locked, captured, complete — the single "yes" of the interface. */

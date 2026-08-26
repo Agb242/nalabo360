@@ -139,6 +139,15 @@ object Strings {
     const val VIEWER_DESCRIPTION =
         "Interactive 360° view of the stitched photo — drag to look around"
 
+    // -- Settings ------------------------------------------------------------
+
+    const val SETTINGS_TITLE = "Settings"
+    const val SETTINGS_BACK_DESCRIPTION = "Back to capture"
+    const val SETTINGS_RETICLE_COLOR = "Reticle colour"
+    const val SETTINGS_RETICLE_PREVIEW_DESCRIPTION =
+        "Preview of the capture reticle with the chosen colour and size"
+    fun settingsReticleSize(percent: Int) = "Reticle size · $percent %"
+
     // -- Orientation debug screen --------------------------------------------
 
     const val ORIENTATION_DEBUG_TITLE = "Orientation tracker"

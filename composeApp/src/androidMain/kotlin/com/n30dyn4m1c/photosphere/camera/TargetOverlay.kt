@@ -22,7 +22,6 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
-import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.unit.dp
 import com.n30dyn4m1c.photosphere.sensor.OrientationData
 import com.n30dyn4m1c.photosphere.ui.theme.SphereAccent
@@ -85,6 +84,7 @@ fun TargetOverlay(
     fieldOfView: FieldOfView,
     modifier: Modifier = Modifier,
     colors: TargetOverlayColors = TargetOverlayColors.Default,
+    reticleScale: Float = 1f,
 ) {
     // Runs on every hand-over, so the incoming marker grows in rather than
     // appearing somewhere new in the same frame the last one turned green.
@@ -118,9 +118,15 @@ fun TargetOverlay(
             colors = colors,
             focus = focus.value,
             pulse = pulse.value,
+            reticleScale = reticleScale,
         )
 
-        drawReticle(alignment = currentAlignment, colors = colors)
+        drawAlignmentReticle(
+            alignment = currentAlignment,
+            color = colors.reticle,
+            alignedColor = colors.reticleAligned,
+            scale = reticleScale,
+        )
 
         if (currentAlignment.isCapturing) {
             // A frame of white where the shutter fired: the same cue a viewfinder
@@ -259,6 +265,7 @@ private fun DrawScope.drawTargets(
     colors: TargetOverlayColors,
     focus: Float,
     pulse: Float,
+    reticleScale: Float,
 ) {
     if (targets.isEmpty()) return
 
@@ -288,6 +295,7 @@ private fun DrawScope.drawTargets(
         focalPx = focalPx,
         focus = focus,
         pulse = pulse,
+        reticleScale = reticleScale,
     )
 }
 
@@ -327,6 +335,7 @@ private fun DrawScope.drawActiveTarget(
     focalPx: Float,
     focus: Float,
     pulse: Float,
+    reticleScale: Float,
 ) {
     val margin = EDGE_MARGIN.toPx()
     val view = camera.project(target)
@@ -348,7 +357,7 @@ private fun DrawScope.drawActiveTarget(
     // The cutoff tracks the reticle's size, so the line never draws inside the
     // ring while the target is already (nearly) centred.
     val separation = (position - center).getDistance()
-    if (separation > min(size.width, size.height) * RETICLE_RADIUS_FRACTION + 24.dp.toPx()) {
+    if (separation > min(size.width, size.height) * RETICLE_RADIUS_FRACTION * reticleScale + 24.dp.toPx()) {
         drawLine(
             color = colors.guide.copy(alpha = colors.guide.alpha * focus),
             start = center,
@@ -377,75 +386,9 @@ private fun DrawScope.drawActiveTarget(
 }
 
 /**
- * The fixed capture reticle, sized like a Photo Sphere reticle: a large ring
- * that the aim has to hold inside, with the dwell arc filling it while the aim
- * is held steady.
- *
- * The ring warms from white toward green as the target closes, which gives the
- * user a continuous read on "am I getting closer" instead of a binary that only
- * resolves at the threshold — and once it closes, holding still is what spins
- * the arc around and fires the shutter.
+ * The fixed capture reticle is drawn by [drawAlignmentReticle] in the shared
+ * `ReticleHud` — the same ring, ticks and dwell arc both platforms aim with.
  */
-private fun DrawScope.drawReticle(
-    alignment: AlignmentState,
-    colors: TargetOverlayColors,
-) {
-    // Sized to the viewport rather than fixed so the reticle reads as a large
-    // thing to aim rather than a fine crosshair to finesse, and stays
-    // proportional on any display.
-    val radius = min(size.width, size.height) * RETICLE_RADIUS_FRACTION
-    val strokeWidth = 3.dp.toPx()
-    val tickLength = 10.dp.toPx()
-
-    // Fully warmed at the threshold, cold from ~4x the threshold outward.
-    val closeness = if (!alignment.hasDistance) {
-        0f
-    } else {
-        (1f - (alignment.distanceDegrees - AlignmentGate.DEFAULT_THRESHOLD_DEGREES) / 6f)
-            .coerceIn(0f, 1f)
-    }
-    val color = lerp(colors.reticle, colors.reticleAligned, closeness)
-
-    // A soft outer halo keeps the ring readable over a bright scene and swells
-    // as the aim closes, so "getting closer" is visible even before the warm-up.
-    drawCircle(
-        color = colors.reticleAligned.copy(alpha = 0.10f + 0.18f * closeness),
-        radius = radius + 8.dp.toPx(),
-        center = center,
-        style = Stroke(width = 1.5.dp.toPx()),
-    )
-
-    drawCircle(color = color, radius = radius, center = center, style = Stroke(width = strokeWidth))
-    drawCircle(color = color, radius = 2.5.dp.toPx(), center = center)
-
-    // Four ticks reaching outward, so the centre stays readable over busy scenes.
-    listOf(0f, 90f, 180f, 270f).forEach { angle ->
-        rotate(degrees = angle, pivot = center) {
-            drawLine(
-                color = color,
-                start = Offset(center.x, center.y - radius - 2.dp.toPx()),
-                end = Offset(center.x, center.y - radius - 2.dp.toPx() - tickLength),
-                strokeWidth = strokeWidth,
-                cap = StrokeCap.Round,
-            )
-        }
-    }
-
-    // The dwell arc: while the aim holds inside the threshold, it fills the
-    // ring's rim, and the shutter fires the moment it completes. Drawn on top
-    // of the ring so the fill and the target are the same circle.
-    if (alignment.dwellProgress > 0f) {
-        drawArc(
-            color = colors.reticleAligned,
-            startAngle = -90f,
-            sweepAngle = 360f * alignment.dwellProgress,
-            useCenter = false,
-            topLeft = Offset(center.x - radius, center.y - radius),
-            size = Size(radius * 2f, radius * 2f),
-            style = Stroke(width = strokeWidth * 1.5f, cap = StrokeCap.Round),
-        )
-    }
-}
 
 /** Arrow pinned to the border, pointing the shortest way toward an off-screen target. */
 private fun DrawScope.drawEdgeChevron(
@@ -504,9 +447,6 @@ private fun Offset.isInside(size: Size, margin: Float): Boolean =
     x >= margin && x <= size.width - margin && y >= margin && y <= size.height - margin
 
 private val EDGE_MARGIN = 28.dp
-
-/** How far the reticle ring's radius reaches out from the centre of the preview. */
-private const val RETICLE_RADIUS_FRACTION = 0.16f
 
 /** Radius of a covered marker's filled dot. */
 private val COMPLETED_DOT_RADIUS_DP = 5.dp

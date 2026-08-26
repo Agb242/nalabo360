@@ -40,7 +40,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.UIKitView
 import com.n30dyn4m1c.photosphere.metadata.GPanoMetadata
 import com.n30dyn4m1c.photosphere.metadata.GPanoXmpInjector
+import com.n30dyn4m1c.photosphere.camera.ReticleOverlay
 import com.n30dyn4m1c.photosphere.sensor.rememberOrientationSensor
+import com.n30dyn4m1c.photosphere.settings.ReticleStyleHub
 import com.n30dyn4m1c.photosphere.storage.StitchedSphere
 import com.n30dyn4m1c.photosphere.stitching.CameraPose
 import com.n30dyn4m1c.photosphere.stitching.PhotoSphereStitcher
@@ -127,6 +129,14 @@ actual fun SphereCaptureScreen(
         factory = { controller.createPreviewView() },
         update = { controller.layoutPreview(it) },
         modifier = modifier.fillMaxSize(),
+    )
+    // The aiming point. iOS capture has no target plan yet, so the reticle is
+    // the only aiming affordance — and the one thing a user can tune for
+    // daylight from the settings screen.
+    val reticleStyle by ReticleStyleHub.style.collectAsState()
+    ReticleOverlay(
+        style = reticleStyle,
+        modifier = Modifier.fillMaxSize(),
     )
     DisposableEffect(controller) {
         controller.start()

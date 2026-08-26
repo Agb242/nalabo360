@@ -73,6 +73,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -110,6 +111,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.n30dyn4m1c.photosphere.BuildConfig
 import com.n30dyn4m1c.photosphere.R
 import com.n30dyn4m1c.photosphere.metadata.GPanoMetadata
+import com.n30dyn4m1c.photosphere.settings.ReticleStyleHub
 import com.n30dyn4m1c.photosphere.sensor.OrientationAccuracy
 import com.n30dyn4m1c.photosphere.sensor.OrientationData
 import com.n30dyn4m1c.photosphere.sensor.currentDisplayRotation
@@ -888,12 +890,18 @@ fun PhotoSphereCameraScreen(
                 factory = { previewView },
             )
 
+            // The reticle answers to the settings screen: colour and size ride
+            // in from the shared style, the success colours stay the app's own.
+            val reticleStyle by ReticleStyleHub.style.collectAsState()
+
             TargetOverlay(
                 orientation = { orientationState.value },
                 alignment = { alignment },
                 plan = plan,
                 activeIndex = activeIndex,
                 fieldOfView = fieldOfView,
+                colors = TargetOverlayColors.Default.copy(reticle = Color(reticleStyle.colorArgb)),
+                reticleScale = reticleStyle.scale,
             )
 
             FocusReticleOverlay(

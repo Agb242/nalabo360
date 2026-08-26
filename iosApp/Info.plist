@@ -12,6 +12,18 @@
 	<string>com.n30dyn4m1c.nalabo360</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
+	<!-- App icon: the compass glyph on brand navy, copied into the bundle root
+	     by build-ipa.sh (no asset catalogue in this hand-assembled bundle). -->
+	<key>CFBundleIcons</key>
+	<dict>
+		<key>CFBundlePrimaryIcon</key>
+		<dict>
+			<key>CFBundleIconFiles</key>
+			<array>
+				<string>AppIcon60x60</string>
+			</array>
+		</dict>
+	</dict>
 	<key>CFBundleName</key>
 	<string>Nalabo360</string>
 	<key>CFBundlePackageType</key>

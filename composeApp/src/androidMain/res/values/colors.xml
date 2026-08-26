@@ -7,5 +7,6 @@
         every cold start.
     -->
     <color name="sphere_background">#FF0A0D10</color>
-    <color name="ic_launcher_background">#FF0B3D5C</color>
+    <!-- Brand navy, sampled from the Nalabo360 wordmark (ui/theme/Color.kt: BrandNavy). -->
+    <color name="ic_launcher_background">#FF0D252D</color>
 </resources>
