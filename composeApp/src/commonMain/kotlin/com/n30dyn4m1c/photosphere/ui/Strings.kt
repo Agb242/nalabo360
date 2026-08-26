@@ -131,6 +131,14 @@ object Strings {
     const val RESULT_DISCARD_CONFIRM = "Discard"
     const val RESULT_DISCARD_CANCEL = "Keep it"
 
+    // -- 360° viewer ---------------------------------------------------------
+
+    const val RESULT_EXPLORE_360 = "Explore in 360°"
+    const val RESULT_VIEWER_CLOSE_DESCRIPTION = "Leave the 360° view"
+    const val VIEWER_HINT = "Drag to look around · Pinch to zoom"
+    const val VIEWER_DESCRIPTION =
+        "Interactive 360° view of the stitched photo — drag to look around"
+
     // -- Orientation debug screen --------------------------------------------
 
     const val ORIENTATION_DEBUG_TITLE = "Orientation tracker"

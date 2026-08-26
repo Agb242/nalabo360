@@ -4,10 +4,12 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.decodeToImageBitmap
+import androidx.compose.ui.graphics.toComposeImageBitmap
 import com.n30dyn4m1c.photosphere.storage.StitchedSphere
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okio.Path
+import java.awt.image.BufferedImage
 import java.io.File
 
 /**
@@ -31,6 +33,16 @@ actual suspend fun decodeSpherePreview(path: Path, maxLongEdge: Int): ImageBitma
         // honoured here; a development preview never ships to a phone.
         runCatching { File(path.toString()).readBytes().decodeToImageBitmap() }.getOrNull()
     }
+
+/**
+ * AWT's INT_ARGB model packs pixels exactly like the projector's output
+ * (0xAARRGGBB ints), so the hand-off is a straight copy — no byte-order dance.
+ */
+actual fun argbBufferToImageBitmap(buffer: IntArray, width: Int, height: Int): ImageBitmap {
+    val image = BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB)
+    image.setRGB(0, 0, width, height, buffer, 0, width)
+    return image.toComposeImageBitmap()
+}
 
 actual suspend fun exportSphereToGallery(sphere: StitchedSphere): Result<ExportedSphere> =
     Result.failure(IllegalStateException("The desktop host has no photo library to export into"))

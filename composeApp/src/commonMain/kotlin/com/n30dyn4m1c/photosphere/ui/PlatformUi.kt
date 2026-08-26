@@ -33,6 +33,17 @@ expect fun BackPressHandler(onBack: () -> Unit)
  */
 expect suspend fun decodeSpherePreview(path: Path, maxLongEdge: Int): ImageBitmap?
 
+/**
+ * Wraps an opaque ARGB pixel buffer of [width] × [height] into an
+ * [ImageBitmap] for the 360° viewer.
+ *
+ * The viewer projects frames into a plain `IntArray`; turning that into a
+ * drawable is the one genuinely platform-specific step (a Bitmap factory on
+ * Android, Skia on iOS). The buffer's contents are copied, so callers may hand
+ * it straight back to the projector for the next frame.
+ */
+expect fun argbBufferToImageBitmap(buffer: IntArray, width: Int, height: Int): ImageBitmap
+
 /** What a completed gallery export reports. */
 data class ExportedSphere(
     /** File name the sphere landed under in the gallery. */

@@ -4,6 +4,7 @@ package com.n30dyn4m1c.photosphere.ui
 
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asComposeImageBitmap
 import androidx.compose.ui.graphics.toComposeImageBitmap
 import com.n30dyn4m1c.photosphere.storage.StitchedSphere
 import com.n30dyn4m1c.photosphere.util.KLog
@@ -13,7 +14,10 @@ import kotlinx.coroutines.withContext
 import okio.FileSystem
 import okio.Path
 import okio.Path.Companion.toPath
+import org.jetbrains.skia.Bitmap
+import org.jetbrains.skia.ColorAlphaType
 import org.jetbrains.skia.Image
+import org.jetbrains.skia.ImageInfo
 import platform.Foundation.NSDate
 import platform.Foundation.NSDateFormatter
 import platform.Foundation.NSLocale
@@ -33,6 +37,8 @@ import platform.darwin.dispatch_get_main_queue
 import kotlin.coroutines.resume
 
 private const val TAG = "PlatformUi"
+
+private const val BGRA_BYTES_PER_PIXEL = 4
 
 /**
  * The iOS half of [PlatformUi]: no back gesture, a photo-library export, the
@@ -54,6 +60,29 @@ actual suspend fun decodeSpherePreview(path: Path, maxLongEdge: Int): ImageBitma
         // straightforward decode is fine for now.
         runCatching { Image.makeFromEncoded(bytes).toComposeImageBitmap() }.getOrNull()
     }
+
+/**
+ * Skia's native 32-bit layout on Apple targets is BGRA byte order, so each
+ * ARGB int is unpacked B,G,R,A rather than handed over as raw memory.
+ */
+actual fun argbBufferToImageBitmap(buffer: IntArray, width: Int, height: Int): ImageBitmap {
+    val bytes = ByteArray(buffer.size * BGRA_BYTES_PER_PIXEL)
+    var writeIndex = 0
+    for (argb in buffer) {
+        bytes[writeIndex] = (argb and 0xFF).toByte()
+        bytes[writeIndex + 1] = ((argb shr 8) and 0xFF).toByte()
+        bytes[writeIndex + 2] = ((argb shr 16) and 0xFF).toByte()
+        // The projector only ever emits opaque pixels; OPAQUE alpha type below
+        // lets Skia take that on trust instead of re-multiplying.
+        bytes[writeIndex + 3] = ((argb ushr 24) and 0xFF).toByte()
+        writeIndex += BGRA_BYTES_PER_PIXEL
+    }
+    val info = ImageInfo.makeS32(width, height, ColorAlphaType.OPAQUE)
+    val bitmap = Bitmap()
+    bitmap.allocPixels(info)
+    bitmap.installPixels(info, bytes, width * BGRA_BYTES_PER_PIXEL)
+    return bitmap.asComposeImageBitmap()
+}
 
 actual suspend fun exportSphereToGallery(sphere: StitchedSphere): Result<ExportedSphere> =
     withContext(Dispatchers.Default) {

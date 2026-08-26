@@ -14,6 +14,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Panorama
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Share
@@ -22,7 +24,9 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
@@ -50,14 +54,19 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.n30dyn4m1c.photosphere.isDebugBuild
 import com.n30dyn4m1c.photosphere.storage.StitchedSphere
+import com.n30dyn4m1c.photosphere.stitching.RgbImage
+import com.n30dyn4m1c.photosphere.stitching.platformImageCodec
 import com.n30dyn4m1c.photosphere.ui.BackPressHandler
+import com.n30dyn4m1c.photosphere.ui.SphereViewer
 import com.n30dyn4m1c.photosphere.ui.Strings
 import com.n30dyn4m1c.photosphere.ui.decodeSpherePreview
 import com.n30dyn4m1c.photosphere.ui.exportSphereToGallery
 import com.n30dyn4m1c.photosphere.ui.shareSphere
 import com.n30dyn4m1c.photosphere.ui.theme.PhotoWell
 import com.n30dyn4m1c.photosphere.ui.theme.PillShape
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Long edge the preview is decoded down to.
@@ -66,6 +75,16 @@ import kotlinx.coroutines.launch
  * 1440 keeps the flat preview sharp on any phone display for about 4 MB.
  */
 private const val PREVIEW_MAX_DIMENSION = 1440
+
+/**
+ * Long edge the interactive 360° viewer decodes the sphere to.
+ *
+ * The viewer re-projects this buffer on every drag frame, so it wants more
+ * resolution than the flat preview to stay crisp when zoomed — but it is held
+ * as raw RGB for as long as the viewer is open. 2560 lands near 10 MB, which
+ * coexists comfortably with everything else this screen keeps alive.
+ */
+private const val VIEWER_MAX_DIMENSION = 2560
 
 /** What has happened to the gallery export so far. */
 private sealed interface ExportState {
@@ -109,12 +128,37 @@ fun PanoramaResultScreen(
     var isPreviewFailed by remember(sphere.file) { mutableStateOf(false) }
     var exportState by remember(sphere.file) { mutableStateOf<ExportState>(ExportState.Idle) }
 
+    // The 360° pane is opt-in and its source decoded lazily: most visits to
+    // this screen end in Export or Share, and a second full decode of the file
+    // would only be paid by people who actually want to look around.
+    var isViewerActive by remember(sphere.file) { mutableStateOf(false) }
+    var viewerSource by remember(sphere.file) { mutableStateOf<RgbImage?>(null) }
+    var isViewerSourceLoading by remember(sphere.file) { mutableStateOf(false) }
+
     LaunchedEffect(sphere.file) {
         val decoded = decodeSpherePreview(sphere.file, PREVIEW_MAX_DIMENSION)
         if (decoded == null) {
             isPreviewFailed = true
         } else {
             preview = decoded
+        }
+    }
+
+    // Decode happens once per sphere, on first entry into the viewer.
+    LaunchedEffect(isViewerActive, sphere.file) {
+        if (!isViewerActive || viewerSource != null) return@LaunchedEffect
+        isViewerSourceLoading = true
+        val decoded = withContext(Dispatchers.Default) {
+            platformImageCodec().decodeJpeg(sphere.file, VIEWER_MAX_DIMENSION)
+        }
+        isViewerSourceLoading = false
+        if (decoded == null) {
+            // Back out gracefully — the flat preview is still there, and the
+            // photo itself is fine; only the viewer could not be prepared.
+            isViewerActive = false
+            snackbarHostState.showSnackbar(Strings.RESULT_PREVIEW_FAILED)
+        } else {
+            viewerSource = decoded
         }
     }
 
@@ -126,6 +170,12 @@ fun PanoramaResultScreen(
 
     /** Leaves the screen, pausing to confirm if the photo would be lost. */
     fun leave() {
+        // Back out of the 360° view first — leaving the screen is a separate,
+        // deliberate gesture from closing it.
+        if (isViewerActive) {
+            isViewerActive = false
+            return
+        }
         if (isSaved) onTakeAnother() else isConfirmingDiscard = true
     }
 
@@ -207,13 +257,77 @@ fun PanoramaResultScreen(
                 }
             }
 
-            SpherePreview(
-                preview = preview,
-                isFailed = isPreviewFailed,
+            Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f),
-            )
+            ) {
+                if (isViewerActive) {
+                    ViewerPane(
+                        source = viewerSource,
+                        isLoadingSource = isViewerSourceLoading,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+
+                    Surface(
+                        shape = PillShape,
+                        color = Color.Black.copy(alpha = 0.55f),
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(12.dp),
+                    ) {
+                        IconButton(onClick = { isViewerActive = false }) {
+                            Icon(
+                                imageVector = Icons.Filled.Close,
+                                contentDescription = Strings.RESULT_VIEWER_CLOSE_DESCRIPTION,
+                                tint = Color.White,
+                            )
+                        }
+                    }
+                    Text(
+                        text = Strings.VIEWER_HINT,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color.White.copy(alpha = 0.75f),
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(bottom = 10.dp),
+                    )
+                } else {
+                    SpherePreview(
+                        preview = preview,
+                        isFailed = isPreviewFailed,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+
+                    // The invitation into the 360° view floats on the photo it
+                    // opens — visible exactly when there is something to open.
+                    if (preview != null) {
+                        FilledTonalButton(
+                            onClick = { isViewerActive = true },
+                            shape = PillShape,
+                            colors = ButtonDefaults.filledTonalButtonColors(
+                                containerColor = Color.Black.copy(alpha = 0.55f),
+                                contentColor = Color.White,
+                            ),
+                            modifier = Modifier
+                                .align(Alignment.BottomEnd)
+                                .padding(12.dp),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Panorama,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Text(
+                                modifier = Modifier.padding(start = 6.dp),
+                                text = Strings.RESULT_EXPLORE_360,
+                                style = MaterialTheme.typography.labelLarge,
+                            )
+                        }
+                    }
+                }
+            }
 
             ResultActions(
                 exportState = exportState,
@@ -292,23 +406,18 @@ private fun DiscardConfirmation(
     )
 }
 
-/** The equirectangular frame, letterboxed into whatever space is going. */
+/**
+ * The recessed frame the photograph lives in — shared by the flat preview and
+ * the 360° pane so switching between them never visibly moves the edges.
+ */
 @Composable
-private fun SpherePreview(
-    preview: ImageBitmap?,
-    isFailed: Boolean,
+private fun PreviewWell(
     modifier: Modifier = Modifier,
+    content: @Composable () -> Unit,
 ) {
     Box(
         modifier = modifier
-            // Clipped as well as filled, so the image inside takes the rounded
-            // corners rather than painting over them.
             .clip(MaterialTheme.shapes.medium)
-            // A well darker than the surface around it, with a hairline to
-            // define the edge: an equirectangular frame has black wedges at the
-            // poles wherever the run did not reach, and without a border those
-            // wedges bleed into the background and the photo appears to have no
-            // edges at all.
             .background(PhotoWell)
             .border(
                 width = 1.dp,
@@ -317,6 +426,18 @@ private fun SpherePreview(
             ),
         contentAlignment = Alignment.Center,
     ) {
+        content()
+    }
+}
+
+/** The equirectangular frame, letterboxed into whatever space is going. */
+@Composable
+private fun SpherePreview(
+    preview: ImageBitmap?,
+    isFailed: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    PreviewWell(modifier = modifier) {
         when {
             preview != null -> Image(
                 bitmap = preview,
@@ -336,6 +457,31 @@ private fun SpherePreview(
             )
 
             else -> CircularProgressIndicator(color = Color.White)
+        }
+    }
+}
+
+/**
+ * The interactive 360° pane — a [com.n30dyn4m1c.photosphere.ui.SphereViewer]
+ * in the same well the flat preview occupied.
+ */
+@Composable
+private fun ViewerPane(
+    source: RgbImage?,
+    isLoadingSource: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    PreviewWell(modifier = modifier) {
+        when {
+            source != null -> SphereViewer(source = source, modifier = Modifier.fillMaxSize())
+            isLoadingSource -> CircularProgressIndicator(color = Color.White)
+            else -> Text(
+                text = Strings.RESULT_PREVIEW_FAILED,
+                style = MaterialTheme.typography.bodyMedium,
+                color = Color.White.copy(alpha = 0.7f),
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(24.dp),
+            )
         }
     }
 }

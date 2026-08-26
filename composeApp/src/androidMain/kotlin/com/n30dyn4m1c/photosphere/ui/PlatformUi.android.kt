@@ -4,6 +4,7 @@ import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.util.Log
 import androidx.activity.compose.BackHandler
@@ -79,6 +80,10 @@ actual suspend fun decodeSpherePreview(path: Path, maxLongEdge: Int): ImageBitma
         }
         BitmapFactory.decodeFile(file.path, options)?.asImageBitmap()
     }
+
+/** The framework bitmap factory ingests ARGB ints directly and copies them. */
+actual fun argbBufferToImageBitmap(buffer: IntArray, width: Int, height: Int): ImageBitmap =
+    Bitmap.createBitmap(buffer, width, height, Bitmap.Config.ARGB_8888).asImageBitmap()
 
 actual suspend fun exportSphereToGallery(sphere: StitchedSphere): Result<ExportedSphere> =
     MediaExporter.export(
